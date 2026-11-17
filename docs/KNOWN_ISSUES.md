@@ -338,12 +338,19 @@ now equals the original's to within 1 unit per axis through frame 430 and the cl
 is one frame early (429; the altitude at the clear is within 0.1%). The replay test
 asserts both.
 
-Still different, **after the clear (frame 430 on)**: the original's ship stays a
-child of planet 111 in the planet's frame in free flight, while
-`end_pad_takeoff` returns it to the system frame, so the same floor-rounding
-asymmetry (and F1014's drag) leaves free-flight speed up to 1.25% off at frame 536
-(velocity z 3974 against 4018 at frame 500). Closing that needs free flight near a
-planet to run in the planet's frame as well (flight-9/parity-05).
+Free flight after the clear (frame 430 on) was up to 1.25% slow (velocity z 3974
+against 4018 at frame 500), and that was **not** the frame: `step_scan` ran F1520
+on the ship's rows after every frame to take out its landing margin, and the
+port's F1519 normalises to 0.992 of unit length (the constant `0x3f800000`), so
+the rows it rebuilt came out at 0.985 and the thrust fell 1.5% from the first
+frame after the clear (the thrust words were 5700 against the original's 5844
+at frame 431). The original only runs F1520 when F611's drift counter goes
+negative, which the tick already does. `step_scan` now divides the margin out
+instead. The replay's velocity is within 1 unit per axis through frame 899 (z
+20370 at frame 899 in both) and the largest speed difference is 0.18%; the test
+asserts under 0.5%. The ship still returns to the system frame at the clear while
+the original keeps it a child of planet 111; with this fix that has no visible
+effect on the speed.
 
 `tools/reference/headless.c` prints, on stderr only, the player's thrust words,
 limits and rows for frames 161-176, 200 and 260 when `FFE_PLAYER_DUMP` is set (the

@@ -363,9 +363,11 @@ fn port_takeoff_replays_the_original_frame_by_frame() {
             ours.1
         );
     }
-    // The climb's drift and F1014's drag in free flight keep the speed within 2%
-    // (without F1014 the port was 23% fast by frame 899).
-    assert!(worst_speed < 0.02, "speed {:.2}% off", worst_speed * 100.0);
+    // The climb and the free flight after it (F1014's drag included; without it
+    // the port was 23% fast by frame 899) keep the speed within 0.5%. A per-frame
+    // F1520 on the ship's rows once cut the thrust 1.5% from the clear on and
+    // left the port 1.25% slow.
+    assert!(worst_speed < 0.005, "speed {:.2}% off", worst_speed * 100.0);
 }
 
 /// F1037/F1121 against the executed original's `--flight keyboard 900`: the

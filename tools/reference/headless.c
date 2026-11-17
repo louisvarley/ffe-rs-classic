@@ -747,7 +747,7 @@ static void flight_trace_row(void)
            position[0], position[1], position[2],
            velocity[0], velocity[1], velocity[2],
            (unsigned long long)previous, (unsigned long long)hash);
-    if (player && getenv("FFE_PLAYER_DUMP") && (frames <= 176 || frames == 200 || frames == 260)) {
+    if (player && getenv("FFE_PLAYER_DUMP") && (frames <= 176 || frames == 200 || frames == 260 || (frames >= 426 && frames <= 436))) {
         /* stderr only: the thrust words (+0xb6..ba), their limits (+0xbc..c6), the
            orientation rows and the sub-unit velocity fractions. */
         fprintf(stderr, "{\"player_dump\":%lu,\"thrust\":[%d,%d,%d],\"limits\":[%d,%d,%d,%d,%d,%d],\"rows\":[",

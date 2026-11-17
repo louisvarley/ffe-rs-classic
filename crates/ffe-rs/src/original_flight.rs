@@ -1299,7 +1299,18 @@ impl OriginalFlight {
             body.velocity[k] = body.velocity[k].wrapping_sub(round_trip.1[k]);
         }
         world.body[1].give_motion(&mut self.player.motion);
-        self.player.motion.renormalise();
+        // F1520 is not run here: its F1519 normalises to 0.992 of unit length
+        // (a factor 0.985 on the rows it rebuilds), and the original only runs
+        // it when F611's drift counter goes negative, which the tick already
+        // does. Divide the margin out instead; renormalising every frame cut the
+        // thrust 1.5% from the first free-flight frame after the takeoff.
+        for row in &mut self.player.motion.orientation {
+            for value in row {
+                *value = (f64::from(*value) / 0.999_99)
+                    .round()
+                    .clamp(-2_147_483_647.0, 2_147_483_647.0) as i32;
+            }
+        }
         // The scan may have cached the ship's absolute position mid-tick (F1677
         // for a pair across frames, the starport's); recompute it from the
         // corrected linear position rather than return that stale value.

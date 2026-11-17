@@ -6,6 +6,7 @@
 - A station launch aligns the ship to the station's spun orientation (`Navigator::spun_rows`, `align_to`), so it leaves straight with the door.
 - The launcher's start location is a dropdown of the four implemented F998 starts (Gateway/Hope, Ross 154, Sol/Mars, Lave Station). `--start` no longer maps 2..=5 to Ross, and the chosen start also applies when the intro is skipped or the game restarts. An Earth start is not implemented (needs its own start spec from the source).
 - The Lave Station start (type 3) no longer begins with a leftover docking sequence, so it can launch (`tests/lave_start.rs`, local-only).
+- Free flight near a planet or starport kept the ship's rows at 0.985 of unit length after the first frame (a per-frame F1520 normalises to 0.992), so thrust was 1.5% low from the clear of a takeoff on; `step_scan` now divides its landing margin out instead. Takeoff replay speed error 1.25% -> 0.18%.
 - The Eagle's laser beam was drawn at the wrong render scale (a red fan); `draw_beam` now uses the firing ship's scale. A one-pixel ray the original does not draw remains (docs/KNOWN_ISSUES.md).
 
 ## 2026-11-15 - Second ten native-resume tasks (persist-16 through persist-25)
@@ -309,10 +310,9 @@ position and velocity in the planet's rotating frame.
   seat to about 1 mm.
 - Climb drift fixed 2026-11-17: the pad world now integrates in the planet's
   rotating frame as the original does (see docs/KNOWN_ISSUES.md); the climb's
-  velocity matches within 1 unit and the clear is 1 frame early. Still open: free
-  flight after the clear is in the system frame; after clearing, the original's acceleration falls with speed
-  while the port's does not. F601/F607 have no drag term, so that is
-  free-flight physics, not F1013.
+  velocity matches within 1 unit and the clear is 1 frame early. Free flight
+  after the clear matches too (velocity within 1 unit to frame 899): the 1.25%
+  gap was `step_scan`'s per-frame F1520, not the frame (docs/KNOWN_ISSUES.md).
 
 The playable's default start now parks 1.8 m from where it did (the altitude
 readout on the pad goes from 19 m to 20 m). The scripted `--capture-start`
