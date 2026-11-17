@@ -680,6 +680,7 @@ static long death_text_draw(long ffcode, void *vars, long colour, long x, long y
 
 static long long get64(const unsigned char *object,unsigned long offset);
 static long get32(const unsigned char *object,unsigned long offset);
+static short get16(const unsigned char *object,unsigned long offset);
 
 /* One bounded row of the scripted flight trace. Every hashed value is an integer
    chosen from the player and planet objects; no framebuffer or game data is
@@ -746,6 +747,16 @@ static void flight_trace_row(void)
            position[0], position[1], position[2],
            velocity[0], velocity[1], velocity[2],
            (unsigned long long)previous, (unsigned long long)hash);
+    if (player && getenv("FFE_PLAYER_DUMP") && (frames <= 176 || frames == 200 || frames == 260)) {
+        /* stderr only: the thrust words (+0xb6..ba), their limits (+0xbc..c6), the
+           orientation rows and the sub-unit velocity fractions. */
+        fprintf(stderr, "{\"player_dump\":%lu,\"thrust\":[%d,%d,%d],\"limits\":[%d,%d,%d,%d,%d,%d],\"rows\":[",
+                frames, (short)get16(player, 0xb6), (short)get16(player, 0xb8), (short)get16(player, 0xba),
+                (short)get16(player, 0xbc), (short)get16(player, 0xbe), (short)get16(player, 0xc0),
+                (short)get16(player, 0xc2), (short)get16(player, 0xc4), (short)get16(player, 0xc6));
+        for (axis = 0; axis < 9; ++axis) fprintf(stderr, "%s%ld", axis ? "," : "", get32(player, 4 * axis));
+        fprintf(stderr, "],\"mass_words\":[%lu,%lu]}\n", (unsigned long)get32(player, 0x118), (unsigned long)get32(player, 0x120));
+    }
     if(geometry_mode && player && frames==170) {
         unsigned char *port=(unsigned char *)state_u32(0xcc);
         printf("{\"free_hold\":%ld,\"cargo_used\":%lu}\n",ref_free_hold,ref_cargo_used);
@@ -2637,6 +2648,7 @@ extern void ref_accelerate(unsigned char *object,unsigned long tics);
 extern void ref_accelerate_uncapped(unsigned char *object,unsigned long tics);
 static void put32(unsigned char *object,unsigned long offset,long value) { memcpy(object+offset,&value,4); }
 static long get32(const unsigned char *object,unsigned long offset) { long v; int w; memcpy(&w,object+offset,4); v=w; return v; }
+static short get16(const unsigned char *object,unsigned long offset) { short v; memcpy(&v,object+offset,2); return v; }
 static int accelerate_vectors(void)
 {
     static unsigned char object[0x200];

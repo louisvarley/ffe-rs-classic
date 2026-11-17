@@ -313,3 +313,32 @@ countdown all match the source. Two ship-hit visuals in the draw loop F1536
   `+0x151` bits `0x60` at zero. The port draws no model 0xa1 and does not carry
   `+0x14e`/`+0x14f` for NPCs. Its RNG draws would also shift the shared stream.
   Needs a run of the original with a ship hit to see when it appears before porting.
+
+## Takeoff climb drift: root cause found (2026-11-17, parity-04)
+
+`tests/takeoff_replay.rs` (original `--flight takeoff 900`, Ross 154) shows the
+port's climb 1.2% slow in speed, its altitude 1% low and F1031's clear 2 frames
+early (428, original 430). Findings:
+
+- The original's climb velocity is **exactly F601's thrust-only integration**
+  (3270 on the ship's Y row, 1,043 tics a frame; simulated in integers it is
+  within 4 of 1,045 units over 88 frames). Its ship rows, thrust words (`+0xb6..ba`)
+  and limits (`+0xbc..c6`) stay constant through the climb. Gravity is not the
+  cause: with F603 disabled the port is still 1.23% slow.
+- The port's ship rows are the original's with x and z negated (the pad world is
+  the planet-**linear** frame; the original keeps the ship in the planet's
+  **rotating** frame, `+0x57`, whose rows here are diag(-1, 1, -1)). F601 floors
+  `(row >> 16) * (tics >> 3) >> 15` per axis, and flooring a negative row differs
+  by one unit from flooring its negation: per frame the original adds
+  x -11.7755, z +0.8981; the port x -11.6757, z +0.9979 (each 0.0998 off, 8.8 over
+  the 88 frames to 260; measured 10). That is the whole drift.
+- A fix must integrate the pad world in the original's frame (all of F601, F603,
+  F585/F1512 and their fraction accumulators, which are frame-dependent), or run
+  the original's F572/F573 rotating-frame switch, which the pad world disables
+  because of its fixed-point round-trip creep. Converting only F601's result is
+  not enough, because the accumulators' remainders also flip sign with the axes.
+  Not started.
+
+`tools/reference/headless.c` now prints, on stderr only, the player's thrust
+words, limits and rows for frames 161-176, 200 and 260 when `FFE_PLAYER_DUMP` is
+set (the stdout trace and its hashes are unchanged).
