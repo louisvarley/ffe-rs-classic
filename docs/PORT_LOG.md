@@ -1,5 +1,13 @@
 # Port log
 
+## 2026-11-17 - Station docking cap, launch orientation, start locations
+
+- Manual flight at high time acceleration no longer docks instantly: the station cap of EXP-021 now applies without the autopilot (not on a surface takeoff).
+- A station launch aligns the ship to the station's spun orientation (`Navigator::spun_rows`, `align_to`), so it leaves straight with the door.
+- The launcher's start location is a dropdown of the four implemented F998 starts (Gateway/Hope, Ross 154, Sol/Mars, Lave Station). `--start` no longer maps 2..=5 to Ross, and the chosen start also applies when the intro is skipped or the game restarts. An Earth start is not implemented (needs its own start spec from the source).
+- The Lave Station start (type 3) no longer begins with a leftover docking sequence, so it can launch (`tests/lave_start.rs`, local-only).
+- The Eagle's laser beam was drawn at the wrong render scale (a red fan); `draw_beam` now uses the firing ship's scale. A one-pixel ray the original does not draw remains (docs/KNOWN_ISSUES.md).
+
 ## 2026-11-15 - Second ten native-resume tasks (persist-16 through persist-25)
 
 Completed ten scoped follow-ups under PAR-18/PAR-20: mid-jump timing and progress;
