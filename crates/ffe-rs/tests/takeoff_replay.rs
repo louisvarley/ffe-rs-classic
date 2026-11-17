@@ -318,6 +318,19 @@ fn port_takeoff_replays_the_original_frame_by_frame() {
             changes.1.push((ours.mode, *frame));
         }
         previous = (Some(theirs.mode), Some(ours.mode));
+        // The climb integrates in the planet's rotating frame as the original
+        // does (F601's per-axis floor rounding depends on the axes' signs), so
+        // its velocity is the original's to within the frame turn's rounding.
+        if theirs.mode != 0 && *frame > LAUNCH_FRAME {
+            for axis in 0..3 {
+                assert!(
+                    (ours.velocity[axis] - theirs.velocity[axis]).abs() <= 3,
+                    "frame {frame} axis {axis}: original {:?}, port {:?}",
+                    theirs.velocity,
+                    ours.velocity
+                );
+            }
+        }
         let speed = length(theirs.velocity);
         if speed > 500.0 {
             worst_speed = worst_speed.max((length(ours.velocity) - speed).abs() / speed);
@@ -335,10 +348,10 @@ fn port_takeoff_replays_the_original_frame_by_frame() {
     );
     for (theirs, ours) in changes.0.iter().zip(&changes.1) {
         // The launch and F1013's hand-off are on the same frame. F1031's clear
-        // may be up to two frames early: the climb runs about 1% slow in the
-        // pad world's linear frame (PAR-05, flight-1).
+        // is one frame early (429 against 430): the altitude at the clear is
+        // within 0.1% (PAR-05, flight-1).
         let slack = if theirs.0 == 0 && theirs.1 > LAUNCH_FRAME {
-            2
+            1
         } else {
             0
         };

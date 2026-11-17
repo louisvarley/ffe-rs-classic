@@ -54,6 +54,21 @@ pub struct Keys {
     pub scancodes: ffe_core::keyboard::ScanSet,
 }
 
+/// A ship's position, velocity and rows (`player.motion`'s three frame-dependent
+/// fields).
+type PadState = ([i64; 3], [i32; 3], [[i32; 3]; 3]);
+
+/// The pad world's authoritative ship state, in the planet's rotating frame,
+/// and the linear view last written to the player's motion. F601's per-axis
+/// floor rounding, F603's gravity and the fraction accumulators all depend on
+/// the frame's axis signs, so they must run in the original's frame (the
+/// planet's rows turn the axes: Ross 154's are diag(-1, 1, -1)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PadLocal {
+    state: PadState,
+    shown: PadState,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OriginalFlight {
     player: Player,
@@ -74,6 +89,10 @@ pub struct OriginalFlight {
     /// and orientation changes) persist from frame to frame while the ship is
     /// on the pad. Dropped when the takeoff clears.
     pad_world: Option<Bodies>,
+    /// The ship's state in the pad world's planet-rotating frame (`+0x57`), the
+    /// frame the original integrates it in, while `player.motion` shows the
+    /// planet-linear view the rest of the port reads.
+    pad_local: Option<PadLocal>,
     guidance: Option<ffe_core::autopilot::Guidance>,
     /// The ship model's collision radius (`+0x140`), the lift F994 gives a pad
     /// seat and F612's radius distance: the descent aims at the pad's surface
@@ -222,6 +241,7 @@ impl OriginalFlight {
             forward_limit: limits.axes[2][0],
             acceleration: crate::console::TIME_ACCELERATION[0],
             pad_world: None,
+            pad_local: None,
             guidance: None,
             collision_radius: 0,
             gear_down: true,
@@ -466,7 +486,73 @@ impl OriginalFlight {
         // pad's, so F1013 climbs from 0x24 instead of reading a new model's
         // "no contact" as already above 0x30d40.
         self.player.altitude = 0;
+        // F994 puts the ship and the starport in the planet's rotating frame
+        // (`+0x57`): turn them into it once (F572), as the original does, and
+        // integrate there from now on.
+        let shown: PadState = (
+            self.player.motion.position,
+            self.player.motion.velocity,
+            self.player.motion.orientation,
+        );
+        if world.live[3] {
+            world.to_rotating(3, 2);
+        }
+        let state = Self::pad_turn(&world, shown, true);
         self.pad_world = Some(world);
+        self.pad_local = Some(PadLocal { state, shown });
+    }
+
+    /// Turn a ship state between the pad world's planet-linear frame and the
+    /// planet's rotating frame (F572 when `into_rotating`, else F573).
+    fn pad_turn(world: &Bodies, state: PadState, into_rotating: bool) -> PadState {
+        let mut scratch = world.clone();
+        let body = &mut scratch.body[1];
+        body.position = state.0;
+        body.velocity = state.1;
+        body.orientation = std::array::from_fn(|k| state.2[k / 3][k % 3]);
+        body.parent = 2;
+        body.rotating = u8::from(!into_rotating);
+        if into_rotating {
+            scratch.to_rotating(1, 2);
+        } else {
+            scratch.to_linear(1, 2);
+        }
+        let body = scratch.body[1];
+        (
+            body.position,
+            body.velocity,
+            std::array::from_fn(|r| std::array::from_fn(|c| body.orientation[3 * r + c])),
+        )
+    }
+
+    /// The ship's state in the rotating frame. Whoever changed the linear view
+    /// since it was last published (a placement, a teleport) wins; otherwise the
+    /// stored state is used unchanged, so the frame turn's rounding never
+    /// accumulates.
+    fn pad_state(&self) -> Option<PadState> {
+        let world = self.pad_world.as_ref()?;
+        let local = self.pad_local?;
+        let motion = &self.player.motion;
+        let now: PadState = (motion.position, motion.velocity, motion.orientation);
+        if now == local.shown {
+            Some(local.state)
+        } else {
+            Some(Self::pad_turn(world, now, true))
+        }
+    }
+
+    /// Store the ship's rotating-frame state and show its linear view.
+    fn pad_publish(&mut self, state: PadState) {
+        let Some(world) = self.pad_world.as_ref() else {
+            return;
+        };
+        let shown = Self::pad_turn(world, state, false);
+        let motion = &mut self.player.motion;
+        motion.position = shown.0;
+        motion.velocity = shown.1;
+        motion.orientation = shown.2;
+        motion.rotating = 0;
+        self.pad_local = Some(PadLocal { state, shown });
     }
 
     /// F1011/F1012: a parked ship reads only F1039's turret steering.
@@ -503,8 +589,16 @@ impl OriginalFlight {
         tools: Option<&SurfaceTools>,
     ) -> Result<Contact, String> {
         let (_, world_tics) = self.prepare(elapsed, keys);
-        self.player.reference_counter = 0xd;
-        self.player.motion.switch_delay = 0x7f;
+        let state = self.pad_state().ok_or("No pad takeoff world to step.")?;
+        {
+            let motion = &mut self.player.motion;
+            motion.position = state.0;
+            motion.velocity = state.1;
+            motion.orientation = state.2;
+            motion.parent = 2;
+            motion.rotating = 1;
+            motion.switch_delay = 0x7f;
+        }
         let world = self
             .pad_world
             .as_mut()
@@ -513,7 +607,10 @@ impl OriginalFlight {
         // stamp, so it must change every frame.
         world.stamp = world.stamp.wrapping_add(1);
         world.frame_tics = world_tics;
-        tick_guided(&mut self.player, self.guidance, world_tics, world, tools)
+        let contact = tick_guided(&mut self.player, self.guidance, world_tics, world, tools);
+        let motion = &self.player.motion;
+        self.pad_publish((motion.position, motion.velocity, motion.orientation));
+        contact
     }
 
     /// Move the pad world's planet and starport to their current navigator
@@ -527,25 +624,13 @@ impl OriginalFlight {
     }
 
     /// Keep a parked ship at F994's current seat after the clock moves the port.
-    /// The pad world stores the ship relative to the planet, so moving the
-    /// world's origin here would also move the collision geometry.
-    pub fn pin_pad_seat(&mut self, seat: [i64; 3], rows: [i32; 9], reverse: bool) {
-        let Some(world) = self.pad_world.as_mut() else {
-            return;
-        };
-        self.player.motion.position =
-            std::array::from_fn(|k| seat[k].wrapping_sub(world.body[2].position[k]));
-        self.player.motion.orientation = std::array::from_fn(|r| {
-            std::array::from_fn(|c| {
-                let value = rows[3 * r + c];
-                if reverse && r != 1 {
-                    value.saturating_neg()
-                } else {
-                    value
-                }
-            })
-        });
-        world.stamp = world.stamp.wrapping_add(1);
+    /// The ship and the starport are fixed in the planet's rotating frame, so the
+    /// seat turns with the planet by itself (see [`Self::move_pad_bodies`]) and
+    /// there is nothing to pin; the arguments are the old linear-frame carry's.
+    pub fn pin_pad_seat(&mut self, _seat: [i64; 3], _rows: [i32; 9], _reverse: bool) {
+        if let Some(world) = self.pad_world.as_mut() {
+            world.stamp = world.stamp.wrapping_add(1);
+        }
     }
 
     /// Move the pad world's planet and starport to their current navigator
@@ -564,61 +649,22 @@ impl OriginalFlight {
         &mut self,
         planet_position: [i64; 3],
         planet_rows: [i32; 9],
-        station_position: [i64; 3],
-        station_rows: [i32; 9],
+        _station_position: [i64; 3],
+        _station_rows: [i32; 9],
     ) {
-        let Some(world) = self.pad_world.as_mut() else {
+        let Some(state) = self.pad_state() else {
             return;
         };
-        world.body[2].position = planet_position;
-        world.body[2].orientation = planet_rows;
-        if world.live[3] {
-            let next: [i64; 3] =
-                std::array::from_fn(|k| station_position[k].wrapping_sub(planet_position[k]));
-            let old = world.body[3].position;
-            let old_rows = world.body[3].orientation;
-            if station_rows == old_rows {
-                // A shift alone: Q31 rows are not exactly orthonormal, so
-                // turning through them when they have not changed would creep
-                // the parked ship by millimetres a frame.
-                let motion = &mut self.player.motion;
-                for k in 0..3 {
-                    motion.position[k] =
-                        motion.position[k].wrapping_add(next[k].wrapping_sub(old[k]));
-                }
-            } else {
-                let q = |v: i32| f64::from(v) / 2_147_483_648.0;
-                // Into the old starport axes, out along the new ones.
-                let turn = |v: [f64; 3]| -> [f64; 3] {
-                    let local: [f64; 3] = std::array::from_fn(|i| {
-                        (0..3).map(|j| q(old_rows[3 * i + j]) * v[j]).sum::<f64>()
-                    });
-                    std::array::from_fn(|j| {
-                        (0..3)
-                            .map(|i| q(station_rows[3 * i + j]) * local[i])
-                            .sum::<f64>()
-                    })
-                };
-                let motion = &mut self.player.motion;
-                let offset: [f64; 3] =
-                    std::array::from_fn(|k| motion.position[k].wrapping_sub(old[k]) as f64);
-                let turned = turn(offset);
-                for k in 0..3 {
-                    motion.position[k] = next[k].wrapping_add(turned[k].round() as i64);
-                }
-                let velocity = turn(motion.velocity.map(f64::from));
-                motion.velocity = velocity.map(|v| v.round() as i32);
-                for row in &mut motion.orientation {
-                    let turned = turn(row.map(f64::from));
-                    *row =
-                        turned.map(|v| v.round().clamp(-2_147_483_648.0, 2_147_483_647.0) as i32);
-                }
-            }
-            world.body[3].position = next;
-            world.body[3].orientation = station_rows;
+        if let Some(world) = self.pad_world.as_mut() {
+            // The ship and the starport keep their rotating-frame coordinates;
+            // only the planet's place and rows move, and the linear view that
+            // the rest of the port reads follows them.
+            world.body[2].position = planet_position;
+            world.body[2].orientation = planet_rows;
+            // F1677's absolute-position cache is keyed by the frame stamp.
+            world.stamp = world.stamp.wrapping_add(1);
         }
-        // F1677's absolute-position cache is keyed by the frame stamp.
-        world.stamp = world.stamp.wrapping_add(1);
+        self.pad_publish(state);
     }
 
     /// The ship model's collision radius (`+0x140`): F994 lifts a pad seat by
@@ -645,42 +691,52 @@ impl OriginalFlight {
     /// F1677's absolute position in millimetres (the player's own position
     /// outside the pad world, where it is already absolute).
     pub fn absolute_position(&self) -> [i64; 3] {
-        match &self.pad_world {
-            Some(world) => {
+        match (&self.pad_world, self.pad_state()) {
+            (Some(world), Some(state)) => {
                 // Resolve the live motion without depending on a previous
                 // collision pass's cached body/stamp.
                 let mut world = world.clone();
                 world.stamp = world.stamp.wrapping_add(1);
-                world.body[1].take_motion(&self.player.motion);
+                let body = &mut world.body[1];
+                body.position = state.0;
+                body.velocity = state.1;
+                body.orientation = std::array::from_fn(|k| state.2[k / 3][k % 3]);
+                body.parent = 2;
+                body.rotating = 1;
                 // A parked body may not have run a collision tick for 256 frames.
                 // Invalidate explicitly: incrementing an 8-bit stamp can alias its
                 // old cache stamp and return an obsolete absolute position.
-                world.body[1].stamp = world.stamp.wrapping_sub(1);
+                body.stamp = world.stamp.wrapping_sub(1);
                 world.absolute(1).unwrap_or(self.player.motion.position)
             }
-            None => self.player.motion.position,
+            _ => self.player.motion.position,
         }
     }
 
     /// Leave the pad world: F573 turns the ship back into the linear frame and
     /// F1677 gives its absolute position, so ordinary free flight continues.
     pub fn end_pad_takeoff(&mut self) {
+        let Some(state) = self.pad_state() else {
+            self.pad_world = None;
+            return;
+        };
         let Some(mut world) = self.pad_world.take() else {
             return;
         };
-        let motion = self.player.motion;
+        self.pad_local = None;
         world.stamp = world.stamp.wrapping_add(1);
-        world.body[1].position = motion.position;
-        world.body[1].velocity = motion.velocity;
-        world.body[1].orientation = std::array::from_fn(|k| motion.orientation[k / 3][k % 3]);
+        let body = &mut world.body[1];
+        body.position = state.0;
+        body.velocity = state.1;
+        body.orientation = std::array::from_fn(|k| state.2[k / 3][k % 3]);
+        body.parent = 2;
+        body.rotating = 1;
         // F1677's absolute position first: it already inverts a rotating frame,
         // so the one-frame hand-over to the system frame does not move the ship
         // by a frame-rotation-sized step.
         world.body[1].stamp = world.stamp.wrapping_sub(1);
-        let absolute = world.absolute(1).unwrap_or(motion.position);
-        if world.body[1].rotating != 0 {
-            world.to_linear(1, 2);
-        }
+        let absolute = world.absolute(1).unwrap_or(state.0);
+        world.to_linear(1, 2);
         let body = world.body[1];
         self.player.motion.position = absolute;
         self.player.motion.velocity = body.velocity;

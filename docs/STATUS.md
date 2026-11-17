@@ -48,8 +48,10 @@ depends on them.
   (10 November: a frame-by-frame replay of the original's takeoff matches every
   mode change and set speed; the pad seat now matches; F1014's atmospheric
   drag and heating now run in flight, so free-flight speed tracks within 1.25%;
-  a 1% climb drift and a 2-frame-early clear remain, tied to the pad world's
-  frame);
+  the climb now matches the original's velocity to 1 unit (17 November: the
+  pad world integrates in the planet's rotating frame) and the clear is 1 frame
+  early; free flight after the clear is still up to 1.25% off, see
+  KNOWN_ISSUES);
   `parity-05` the original's frame and contact rules instead of the launch
   altitude stand-in and collision grace; (`parity-06`, set-speed controls,
   input gates and speed persistence, is done: 10 November; F1121's held-key

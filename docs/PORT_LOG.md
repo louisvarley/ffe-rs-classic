@@ -307,9 +307,10 @@ position and velocity in the planet's rotating frame.
   now taken in the port's frame too). Both starts' seats match the original's
   `--geometry` within one unit; the time-warp test still holds the parked
   seat to about 1 mm.
-- Open: the climb runs about 1% slow and F1031 clears two frames early (the
-  pad world keeps the planet's linear frame with fixed rows, PAR-05 and
-  `flight-1`); after clearing, the original's acceleration falls with speed
+- Climb drift fixed 2026-11-17: the pad world now integrates in the planet's
+  rotating frame as the original does (see docs/KNOWN_ISSUES.md); the climb's
+  velocity matches within 1 unit and the clear is 1 frame early. Still open: free
+  flight after the clear is in the system frame; after clearing, the original's acceleration falls with speed
   while the port's does not. F601/F607 have no drag term, so that is
   free-flight physics, not F1013.
 
