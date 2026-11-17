@@ -751,11 +751,11 @@ static void flight_trace_row(void)
         /* stderr only: the reserve F929 spends (+0x11e), the shield and hull words F938 recharges
            and repairs (+0xe0, +0xe2, +0xe4), the hull temperature (DATA_008804+0x1ec), the
            fuel units (DATA_008804+0x15a/0x15c) and the frame's tics. */
-        fprintf(stderr, "{\"reserve\":%lu,\"mode\":%u,\"tics\":%lu,\"energy\":%lu,\"shield\":%u,\"shield_max\":%u,\"hull\":%u,\"heat\":%ld,\"fuel\":[%u,%u],\"marker\":%lu,\"day\":%lu}\n",
+        fprintf(stderr, "{\"reserve\":%lu,\"mode\":%u,\"tics\":%lu,\"energy\":%lu,\"shield\":%u,\"shield_max\":%u,\"hull\":%u,\"heat\":%ld,\"fuel\":[%u,%u],\"marker\":%lu,\"day\":%lu,\"rng\":[%lu,%lu]}\n",
                 frames, (unsigned)ref_pl_mode, (unsigned long)ref_pl_frame_tics, (unsigned long)get32(player, 0x11e),
                 (unsigned)get16(player, 0xe0), (unsigned)get16(player, 0xe2), (unsigned)get16(player, 0xe4),
                 (long)state_u32(0x1ec), (unsigned)(ref_state[0x15a] | ref_state[0x15b] << 8), (unsigned)(ref_state[0x15c] | ref_state[0x15d] << 8),
-                state_u32(8), state_u32(4));
+                state_u32(8), state_u32(4), state_u32(0x24), state_u32(0x28));
     }
     if (player && getenv("FFE_PLAYER_DUMP") && (frames <= 176 || frames == 200 || frames == 260 || (frames >= 426 && frames <= 436))) {
         /* stderr only: the thrust words (+0xb6..ba), their limits (+0xbc..c6), the

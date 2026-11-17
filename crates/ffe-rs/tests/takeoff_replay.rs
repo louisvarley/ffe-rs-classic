@@ -112,6 +112,10 @@ fn replay_with(
     .unwrap();
     let mut nav = Navigator::new_game(&cache, 1).unwrap();
     let index = nav.docked.expect("landed at the start starport");
+    // The executed original's RNG pair changes once in 900 frames of this takeoff
+    // (the boot's F688 at frame 162) and never during the climb or the free flight
+    // (`FFE_RESERVE_DUMP`'s `rng`), so nothing here may draw from the shared pair.
+    let rng_at_start = (nav.random.a, nav.random.b);
     let start = nav.new_game.unwrap();
     let body = nav.bodies[index].clone();
     let planet = nav.bodies[body.parent.unwrap()].clone();
@@ -292,6 +296,11 @@ fn replay_with(
         }
         reserve.push((frame, reserve_state.combat.energy));
     }
+    assert_eq!(
+        (nav.random.a, nav.random.b),
+        rng_at_start,
+        "the takeoff drew from the shared RNG pair"
+    );
     (rows, reserve)
 }
 
