@@ -293,3 +293,23 @@ right, where the original draws nothing. After a shot the original's `+0x151` by
 stays `04`, which F1776 would clear if it ran its front-gun branch, so check
 whether F1776 returns early in the front view (and what it tests) before hiding
 those pixels.
+
+## Hit flash timing and the model-0xa1 glow (found 2026-11-17, parity-01 audit)
+
+F938 (`ffe.asm:70122`) is ported in full for the player: shield recharge, hull
+auto-repair, laser heat cooling, F929's thrust energy and the `+0x10e` hull line
+countdown all match the source. Two ship-hit visuals in the draw loop F1536
+(`ffe.asm:91262-91340`) are not the original's yet:
+
+- **Model 0x9d flash length.** The original draws it once: F1536 clears
+  `+0x151 & 1` as it draws, so the flash lasts one drawn frame. The port holds it
+  for `FLASH_SECONDS` = 0.25 s (`ffe_core::npc`). Not changed: one frame at the
+  port's 60 Hz presentation would be much shorter than the original's, and the
+  original's frame time has not been measured.
+- **Model 0xa1 glow.** While `+0x14f != 0` (and `+0x151 != 0`) F1536 first draws
+  a copy of the ship as model `0xa1` with random orientation (F1533, `MatBuildYZT`
+  with two F1530 draws). `+0x14f` is set to 2 (F935, `ffe.asm:69995/70009`) or 7
+  (`ffe.asm:70080`) and counted down by F938's whole-second events, which clear
+  `+0x151` bits `0x60` at zero. The port draws no model 0xa1 and does not carry
+  `+0x14e`/`+0x14f` for NPCs. Its RNG draws would also shift the shared stream.
+  Needs a run of the original with a ship hit to see when it appears before porting.
