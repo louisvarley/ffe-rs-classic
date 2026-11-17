@@ -172,7 +172,11 @@ the star and the ground now agree. What differs:
   port's anchor orbit as a scaled stand-in for F702 so that pirates can reach the
   player (PAR-15: the port's AI cannot fly the original's distances). Matching the
   scanner means either that or hiding contacts the original would not have in the
-  player's frame: an owner decision, not made here.
+  player's frame. Done 2026-11-17 (owner): a pirate-group ship farther than F931's hit
+  range (8.4 km) from the player is kept off the scanner (EXP-022); the stand-in
+  placement itself is unchanged. The original's one white dot (about 8 px right of
+  the centre) is still not drawn: the port's only contact there is the starport,
+  which F275 skips.
 - **Red-roofed object** at about (52-65, 76-82): not the model-44 bay ship. That ship
   has parent 91 and offset (0, 23812, -1), the bay slot of an orbital station, so it is
   not visible from the pad. The object is still unidentified.

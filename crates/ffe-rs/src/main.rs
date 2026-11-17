@@ -8460,6 +8460,16 @@ fn run() -> Result<(), String> {
                 }
             }),
             registration: parent_name,
+                    // F702 puts a pirate group on a far orbit round the root
+                    // frame, so F275's same-frame filter never shows it until it
+                    // has flown in. The port's stand-in orbit is 3 km to 30 km from
+                    // the pad; keep such a ship off the scanner (root frame) until
+                    // it is within F931's hit range (EXP-022).
+                    let unseen = ship.role == ffe_core::npc::Role::Pirate
+                        && (0..3)
+                            .map(|k| ((ship.position[k] - player_at[k]) as f64).powi(2))
+                            .sum::<f64>()
+                            > PIRATE_SCANNER_RANGE * PIRATE_SCANNER_RANGE;
             autopilot,
             turret: views.mode.is_turret().then(|| {
                 (
@@ -9514,6 +9524,10 @@ fn buy_ship(
                 state.drive_fitted(nav.day());
             }
             state.hull = [0, 0];
+/// F931's hit range (`0x7fffff` mm): a pirate group nearer than this is on the
+/// scanner, a farther one is still on F702's far orbit (EXP-022).
+const PIRATE_SCANNER_RANGE: f64 = 8_388_607.0;
+
             state.shields = [0, 0];
             "Congratulations on your purchase. Call our upgrade department for the latest in additional equipment.".to_owned()
         }
