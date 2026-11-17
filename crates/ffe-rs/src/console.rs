@@ -71,6 +71,25 @@ impl Button {
 pub const TIME_ACCELERATION: [u32; 5] = [0x3e2, 0x26d6, 0x1_845c, 0xf_2b98, 0x97_b3f0];
 pub const ACCELERATION_NAMES: [&str; 5] = ["1X", "10X", "100X", "1000X", "10000X"];
 
+/// The port's distance-based safety caps on the time step. `world_cap` (near a
+/// planet or moon) applies only to autopilot travel: player acceleration is the
+/// source's explicit F208 selection, including takeoff. `station_cap` (near a
+/// station or starport) also applies to manual flight, so a high step cannot
+/// carry the ship through the docking slot in one frame; it is lifted during a
+/// surface takeoff, which leaves a pad rather than approaching one.
+pub fn safety_acceleration_cap(
+    autopilot_engaged: bool,
+    surface_takeoff: bool,
+    world_cap: Option<usize>,
+    station_cap: Option<usize>,
+) -> Option<usize> {
+    if surface_takeoff {
+        return None;
+    }
+    let world_cap = world_cap.filter(|_| autopilot_engaged);
+    [world_cap, station_cap].into_iter().flatten().min()
+}
+
 /// The meter's six steps (buttons 0x26-0x2b): position, grey and lit bitmap ids.
 /// The first is the pause mark.
 pub const BAR: [(i32, i32, u16, u16); 6] = [
@@ -784,6 +803,32 @@ pub fn acceleration_for_digit(digit: char) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_safety_cap_does_not_change_player_time_selection() {
+        assert_eq!(safety_acceleration_cap(false, false, Some(2), None), None);
+        assert_eq!(safety_acceleration_cap(false, true, Some(2), None), None);
+        assert_eq!(safety_acceleration_cap(true, true, Some(2), None), None);
+        assert_eq!(safety_acceleration_cap(true, false, Some(2), None), Some(2));
+    }
+
+    #[test]
+    fn station_safety_cap_holds_manual_flight_but_not_a_surface_takeoff() {
+        // A manual approach is held, so a high step cannot skip the slot.
+        assert_eq!(
+            safety_acceleration_cap(false, false, None, Some(0)),
+            Some(0)
+        );
+        assert_eq!(
+            safety_acceleration_cap(true, false, Some(2), Some(0)),
+            Some(0)
+        );
+        assert_eq!(
+            safety_acceleration_cap(true, false, Some(1), Some(2)),
+            Some(1)
+        );
+        assert_eq!(safety_acceleration_cap(false, true, None, Some(0)), None);
+    }
 
     #[test]
     fn f1120_draws_the_missile_pylons_from_the_d6_words() {

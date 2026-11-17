@@ -193,17 +193,13 @@ fn options() -> Result<Options, String> {
                 if start_type > 5 {
                     return Err("start type must be 0..5 or sol".to_owned());
                 }
-                if (2..=5).contains(&start_type) {
+                if (2..=3).contains(&start_type) {
                     eprintln!(
-                        "Start type {start_type} is the JJFFE mapping and is not verified; \
-                         starting type 1 (Ross 154)."
+                        "Start type {start_type} is the JJFFE mapping (F998) and is not \
+                         verified against the executed original."
                     );
                 }
-                Boot::NewGame(if (2..=5).contains(&start_type) {
-                    1
-                } else {
-                    start_type
-                })
+                Boot::NewGame(start_type)
             };
         } else if arg == "--skip-intro" && !skip_intro {
             skip_intro = true;
@@ -802,6 +798,7 @@ fn run_intro(
     sound: &mut GameAudio,
     save_dir: &Path,
     session: &mut Session,
+    default_start: u8,
 ) -> Result<IntroExit, String> {
     let intro = Intro::new();
     if let Some(viewer) = scene.as_deref_mut() {
@@ -861,6 +858,13 @@ fn run_intro(
                         eprintln!("{notice}");
                     }
                     sound.leave_front_end();
+                    // Any other key is the DOS default start; the port lets
+                    // `--start` (the launcher's starting location) replace it.
+                    let chosen = if chosen == ffe_rs::navigation::DEFAULT_START_TYPE {
+                        default_start
+                    } else {
+                        chosen
+                    };
                     return Ok(IntroExit::Start(chosen));
                 }
             }
@@ -1319,6 +1323,12 @@ fn run() -> Result<(), String> {
         || options.capture_gameover.is_some()
         || options.capture_save.is_some();
     let mut boot = options.boot;
+    // The start `--start` (the launcher's starting location) chose: the intro's
+    // "any other key" arm and a restart with the intro skipped begin there.
+    let chosen_start = match options.boot {
+        Boot::NewGame(start_type) => start_type,
+        Boot::Sandbox => ffe_rs::navigation::DEFAULT_START_TYPE,
+    };
     let mut load_path = options.load.clone();
     if !options.skip_intro
         && !scripts
@@ -1334,6 +1344,7 @@ fn run() -> Result<(), String> {
             &mut sound,
             &save_dir,
             &mut session,
+            chosen_start,
         )? {
             IntroExit::Quit => return Ok(()),
             IntroExit::Start(start_type) => boot = Boot::NewGame(start_type),
@@ -1647,9 +1658,10 @@ fn run() -> Result<(), String> {
                         &mut sound,
                         &save_dir,
                         &mut session,
+                        chosen_start,
                     )?
                 } else {
-                    IntroExit::Start(ffe_rs::navigation::DEFAULT_START_TYPE)
+                    IntroExit::Start(chosen_start)
                 };
                 match exit {
                     IntroExit::Quit => return Ok(()),
@@ -2340,17 +2352,13 @@ fn run() -> Result<(), String> {
                 paused = false;
                 held_controls.disarm(&keys_down);
             }
-            let step = if surface_takeoff { 0 } else { requested };
+            let step = requested;
             acceleration = step;
             // F208: a 10x..10000x selection pulls F152's marker back one event.
             state.combat.select_acceleration(step);
             if let Some(model) = original.as_mut() {
                 model.set_time_acceleration(step);
-                message = if step != requested {
-                    "Time acceleration held at 1X during surface takeoff.".to_owned()
-                } else {
-                    format!("Time acceleration {}.", ACCELERATION_NAMES[step])
-                };
+                message = format!("Time acceleration {}.", ACCELERATION_NAMES[step]);
             } else {
                 message = format!(
                     "Time acceleration {} (applies to the original flight model).",
@@ -2358,12 +2366,10 @@ fn run() -> Result<(), String> {
                 );
             }
         }
-        // Port rule (not the source's): within a world's terrain sphere (its
-        // outer radius) the time acceleration is held at 100x. One 10000x frame
-        // is nearly three minutes of world time, and thrust fixed for that long
-        // beside the ground of a 2 g world flies the ship into it.
-        // The chosen step comes back once the ship is clear of the world.
-        if chosen_step.is_some() || surface_takeoff {
+        // The near-world cap is only used for autopilot travel; the player's
+        // time selection follows F208, including a surface takeoff. The station
+        // cap also holds manual flight, so a high step cannot skip the slot.
+        if chosen_step.is_some() {
             held_acceleration = None;
         }
         if let (Some(model), Some(nav)) = (original.as_mut(), nav.as_ref()) {
@@ -2395,13 +2401,12 @@ fn run() -> Result<(), String> {
             let station = flying
                 .then(|| station_acceleration_cap(&nav.bodies, at, moved))
                 .flatten();
-            let cap = [
+            let cap = ffe_rs::console::safety_acceleration_cap(
+                nav.autopilot_engaged(),
+                surface_takeoff,
                 world.map(|_| NEAR_WORLD_ACCELERATION),
                 station.as_ref().map(|(step, _)| *step),
-            ]
-            .into_iter()
-            .flatten()
-            .min();
+            );
             let wanted = held_acceleration.unwrap_or(acceleration);
             match cap {
                 Some(cap) if wanted > cap => {
@@ -6655,7 +6660,17 @@ fn run() -> Result<(), String> {
                 let port = nav
                     .as_ref()
                     .and_then(|nav| nav.docked.and_then(|index| nav.port(index)));
-                if let Some(port) = port {
+                // F1088 copies the station's rows to the ship, so it leaves
+                // level with the door, not rolled to the system's y axis (the
+                // station spins about its docking axis).
+                let rows = nav.as_ref().and_then(|nav| {
+                    let index = nav.docked?;
+                    nav.spun_rows(&cache, index)
+                        .or_else(|| nav.bodies.get(index).map(|body| body.orientation))
+                });
+                if let (Some(_), Some(rows)) = (port, rows) {
+                    model.align_to(rows);
+                } else if let Some(port) = port {
                     model.face(port.point(port.front + 1.0e12));
                 } else if let Some(world) = nav.as_ref().and_then(|nav| nav.nearest_world(at)) {
                     model.face(world);
@@ -8595,7 +8610,17 @@ fn run() -> Result<(), String> {
                 .and_then(|nav| nav.docked.and_then(|index| nav.port(index)))
             {
                 let forward = port.axis;
-                inside.axes = Some([[forward[2], 0.0, -forward[0]], [0.0, 1.0, 0.0], forward]);
+                // The station's current rows, so the lift's view is level with
+                // the door the ship will leave by.
+                let rows = nav.as_ref().and_then(|nav| {
+                    let index = nav.docked?;
+                    nav.spun_rows(&cache, index)
+                });
+                inside.axes = Some(rows.unwrap_or([
+                    [forward[2], 0.0, -forward[0]],
+                    [0.0, 1.0, 0.0],
+                    forward,
+                ]));
             } else if let Some(body) = nav
                 .as_ref()
                 .and_then(|nav| nav.docked.and_then(|index| nav.bodies.get(index)))

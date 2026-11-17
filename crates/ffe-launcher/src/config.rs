@@ -9,16 +9,27 @@ pub const LAUNCHER_FILE: &str = "launcher.cfg";
 const MAX_BYTES: u64 = 16 * 1024;
 
 /// The start points the game accepts (`--start`), with their names.
-pub const STARTS: [(u8, &str, &str); 2] = [
+/// The code is the game's `--start` type (F998's arms; the list index is the code).
+pub const STARTS: [(u8, &str, &str); 4] = [
     (
         0,
-        "Gateway",
-        "The default start: on the pad at Old Blackelk, on Hope in the Gateway system.",
+        "Gateway (Hope)",
+        "The default start: a Saker Mk III on the pad at Old Blackelk, on Hope in the Gateway system.",
     ),
     (
         1,
         "Ross 154",
-        "The alternative start in the Ross 154 system.",
+        "An Eagle on the pad of a starport in the Ross 154 system.",
+    ),
+    (
+        2,
+        "Sol (Mars)",
+        "An Eagle on the pad of a starport on Mars, in the Sol system.",
+    ),
+    (
+        3,
+        "Lave Station",
+        "Docked at Lave Station in the Lave system.",
     ),
 ];
 
@@ -183,6 +194,19 @@ mod tests {
         let mut read = Launcher::defaults(root);
         read.read(&launcher.to_text());
         assert_eq!(read, launcher);
+    }
+
+    #[test]
+    fn every_listed_start_round_trips_and_codes_are_list_indices() {
+        for (index, (code, _, _)) in STARTS.iter().enumerate() {
+            assert_eq!(usize::from(*code), index);
+            let mut read = Launcher::defaults(Path::new("/games/ffe"));
+            read.read(&format!("start={code}\n"));
+            assert_eq!(read.start, *code);
+        }
+        let mut read = Launcher::defaults(Path::new("/games/ffe"));
+        read.read("start=4\n");
+        assert_eq!(read.start, 0, "types 4 and 5 repeat the default arm");
     }
 
     #[test]

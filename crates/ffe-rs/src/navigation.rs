@@ -2841,7 +2841,9 @@ impl Navigator {
             bought: false,
         });
         if spec.mode == 0x2a {
-            nav.sequence = Some(Sequence { station:index, stages: Stages { state:spec.mode, timeout:0, drawn:None }, launching:false });
+            // Docked (0x2a) is where a docking sequence ends, and `tick_traffic`
+            // clears the sequence there: a lingering one made `begin_launch`
+            // answer "Already launching." so the Lave start could not launch.
             nav.altitude = i32::MAX;
             nav.legal.fines[1] = 0xaae60;
             nav.legal.fines[2] = 0xaae60;

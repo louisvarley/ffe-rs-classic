@@ -1003,22 +1003,23 @@ impl App {
             |ui| {
                 ui.add_enabled_ui(!running, |ui| {
                     let before = self.launcher.clone();
+                    let mut start = config::STARTS
+                        .iter()
+                        .position(|(code, _, _)| *code == self.launcher.start)
+                        .unwrap_or(0);
+                    let labels: Vec<String> = config::STARTS
+                        .iter()
+                        .map(|(_, name, _)| (*name).to_owned())
+                        .collect();
                     option_row(
                         ui,
                         "Starting location",
-                        "Where a new commander begins.",
+                        config::STARTS[start].2,
                         |ui| {
-                            for (code, name, description) in config::STARTS.iter().rev() {
-                                if ui
-                                    .add(pill(name, self.launcher.start == *code))
-                                    .on_hover_text(*description)
-                                    .clicked()
-                                {
-                                    self.launcher.start = *code;
-                                }
-                            }
+                            combo(ui, "start-location", &mut start, &labels);
                         },
                     );
+                    self.launcher.start = config::STARTS[start].0;
                     option_row(ui, "Skip intro", "Go straight to the game.", |ui| {
                         toggle(ui, &mut self.launcher.skip_intro);
                     });

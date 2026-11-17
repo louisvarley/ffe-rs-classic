@@ -65,9 +65,18 @@ planet's centre less F610's radius), F592/F596/F597's guidance and F587's turns
   target, so the target stays ahead. (A waypoint a fixed step ahead of the ship, the
   first version, held the ship to a crawl away from the planet with the target behind
   it.) F597's arrival takes precedence.
-- **Port rule: time acceleration near worlds.** Inside a planet's or moon's outer
-  radius the acceleration is held at 100x: one 10000x frame is nearly three minutes of
-  thrust in a fixed direction beside the ground of a 2 g world.
+- **Safety caps (port rule).** The near-world time-acceleration limit applies
+  only while the autopilot is engaged. In player-controlled flight, including
+  planetary takeoff, the meter keeps the F208-selected step as in JJFFE;
+  takeoff's F1013 altitude handoff does not change it. The near-station limit
+  (EXP-021: no step may carry the ship more than an eighth of the way to a
+  station in one frame; 100x inside 50 radii, 10x inside 10, 1x inside 2) also
+  holds manual flight, so a 1000x/10000x approach drops to a safe step before
+  the slot instead of docking in one frame. It is lifted during a surface
+  takeoff and the chosen step returns once the way is clear.
+- **Station launch orientation.** The ship leaves a station with the station's
+  current spun rows (F1088 copies them), not a level roll toward the docking
+  axis, so it is straight with the door; the lift's inside view uses the same rows.
 - **Frames.** Inside a world's atmosphere the ship moves with that world (or a starport
   on it within 200 km), never with an orbiting target; carrying it along a station's
   orbit from just above the ground threw it into the terrain.
