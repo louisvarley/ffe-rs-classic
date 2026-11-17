@@ -152,6 +152,35 @@ Use a short ID, affected subsystem, exact source reference, baseline/build,
 reproduction steps, expected vs observed, and planned correction. Add a failing
 test first and record any intentional behavior change; default fixes are allowed.
 
+## Hope start frame against the executed original (2026-11-17, parity-07)
+
+`FFE_START_KEY=0x39 jjffe-smoke --game-frame 260 0xff` (the default Hope start; with
+no key set the harness starts a different system) against `ffe-rs --start 0
+--skip-intro --capture-start <dir>`, frame 10 (frame 0 is mid-fade). The port's shot
+is 640 x 480 (sample x * 2, y * 2.4) and the harness writes 6-bit palette values
+(multiply by 4), so compare palette indices, not pixels. Text, HUD, buildings, towers,
+the star and the ground now agree. What differs:
+
+- **Sky gradient and clock.** The original's frame reads 12:00:02, the port's 12:00:00;
+  the atmosphere's palette entries move with the time, so the horizon band differs.
+  Capture both at the same clock before reading anything into it.
+- **Scanner stalk.** The port draws a tall stalk at the scanner's centre: nine
+  pirate-group ships (masses 20-134) sit 27.7-28.1 km from the pad, inside the
+  scanner's range. In the original those ships are in the root frame (parent 114, at
+  about 1e15 mm: F702's far orbit), so F275's same-frame filter drops them and the
+  scanner shows one white dot (the starport's body). `docs/notes/npc.md` records the
+  port's anchor orbit as a scaled stand-in for F702 so that pirates can reach the
+  player (PAR-15: the port's AI cannot fly the original's distances). Matching the
+  scanner means either that or hiding contacts the original would not have in the
+  player's frame: an owner decision, not made here.
+- **Red-roofed object** at about (52-65, 76-82): not the model-44 bay ship. That ship
+  has parent 91 and offset (0, 23812, -1), the bay slot of an orbital station, so it is
+  not visible from the pad. The object is still unidentified.
+- **Bay-ship places.** The original's six bay ships are in three places (parents 91,
+  102 and 108, four of them in 108); the port's are in five, with the same models.
+  The models match slot for slot, the places do not, which points at F700's place
+  draw or order (PAR-16).
+
 ## F1476 state shared between vertex jitter and other code (decided 2026-10-23)
 
 The original's vertex opcodes 7/8 draw from F1476 (`DATA_008818`/`DATA_008820`),
