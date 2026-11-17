@@ -95,7 +95,7 @@ fn keyboard_keys(frame: u64) -> OriginalKeys {
 
 /// The port's frames from the launch action on, keyed by the trace's frame number.
 fn replay(last: u64) -> Vec<(u64, State)> {
-    replay_with(last, takeoff_keys, None)
+    replay_with(last, takeoff_keys, None).0
 }
 
 /// The same with `keys_for(frame)` held and, when given, the input clock set
@@ -104,7 +104,7 @@ fn replay_with(
     last: u64,
     keys_for: fn(u64) -> OriginalKeys,
     clock: Option<(u32, u32)>,
-) -> Vec<(u64, State)> {
+) -> (Vec<(u64, State)>, Vec<(u64, u32)>) {
     use ffe_core::traffic::{state as traffic_state, TakeoffStep};
     let cache = ffe_content::read(
         &std::fs::read(std::env::var_os("FFE_WORLD_CACHE").expect("FFE_WORLD_CACHE")).unwrap(),
@@ -163,6 +163,18 @@ fn replay_with(
         start.ship
     );
     let mut model = OriginalFlight::from_flight(&flight, ship_stats.as_ref());
+    // The reserve F938/F929 spend (`+0x11e`): the new game's first F152 dispatches
+    // 43,200 events at frame 162; after that every 1,043-tic frame adds to the
+    // day fraction and a whole event is due each 0xc22e units. The events run on
+    // the thrust words the frame left (F1007 runs after the flight step).
+    let mut reserve_state = ffe_rs::boot::new_commander(&cache, &nav).unwrap().0;
+    let mut events = ffe_core::second_events::SecondEvents::new_game();
+    let mut reserve: Vec<(u64, u32)> = Vec::new();
+    let ship = ship_stats.clone().expect("ship statistics");
+    reserve_state.player_events(events.advance(1043), 0x30, &ship, 0);
+    for _ in 163..=LAUNCH_FRAME + 1 {
+        assert_eq!(events.advance(1043), 0);
+    }
     // Parked on the pad until the launch action.
     model.begin_pad_takeoff(
         &planet_body,
@@ -273,8 +285,14 @@ fn replay_with(
         mode = model.mode();
         altitude = i64::from(model.player().altitude);
         rows.push((frame, state(&model, mode, altitude)));
+        let due = events.advance(1043);
+        if due != 0 {
+            let thrust = reserve_state.thrust_sum(model.thrust_words());
+            reserve_state.player_events(due, model.mode(), &ship, thrust);
+        }
+        reserve.push((frame, reserve_state.combat.energy));
     }
-    rows
+    (rows, reserve)
 }
 
 #[test]
@@ -398,7 +416,7 @@ fn port_set_speed_follows_the_original_keyboard() {
     let last = reference.last().unwrap().frame;
     // The modes are the takeoff replay's to check (F1031's clear may come up to
     // two frames early here too, PAR-05); F1037 runs the same in 0x26 and 0.
-    let port = replay_with(
+    let (port, _) = replay_with(
         last,
         keyboard_keys,
         Some((start.timer_last, start.timer_next)),
@@ -460,4 +478,52 @@ fn hope_seat_matches_the_original() {
             assert!((got - want).abs() <= 1, "{name}: {local:?}");
         }
     }
+}
+
+/// The original's reserve (`+0x11e`, `jjffe-smoke --flight keyboard 900` with
+/// `FFE_RESERVE_DUMP=1`, stderr) against `Flight::player_events` driven by the same
+/// frame clock, thrust words and mode (PAR-01). Run with `FFE_WORLD_CACHE`,
+/// `FFE_KEYBOARD_TRACE` and `FFE_RESERVE_TRACE`.
+#[test]
+#[ignore = "Local-only: needs FFE_WORLD_CACHE, FFE_KEYBOARD_TRACE and FFE_RESERVE_TRACE"]
+fn port_reserve_follows_the_original() {
+    #[derive(Deserialize)]
+    struct Reserve {
+        reserve: u64,
+        energy: u32,
+    }
+    let theirs: Vec<Reserve> = std::fs::read_to_string(std::env::var_os("FFE_RESERVE_TRACE").unwrap())
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("{\"reserve\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let last = trace("FFE_KEYBOARD_TRACE").last().unwrap().frame;
+    let clock: Vec<KeyboardRow> = std::fs::read_to_string(std::env::var_os("FFE_KEYBOARD_TRACE").unwrap())
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("{\"keyboard\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let first = clock
+        .iter()
+        .find(|row| row.keyboard == LAUNCH_FRAME + 1)
+        .expect("keyboard row for the launch frame");
+    let (_, ours) = replay_with(last, keyboard_keys, Some((first.timer_last, first.timer_next)));
+    let mut worst = 0i64;
+    for (frame, energy) in &ours {
+        let Some(row) = theirs.iter().find(|row| row.reserve == *frame) else {
+            continue;
+        };
+        let difference = i64::from(*energy) - i64::from(row.energy);
+        if std::env::var_os("FFE_TAKEOFF_VERBOSE").is_some() && difference != 0 {
+            eprintln!("frame {frame}: original {} port {energy} ({difference})", row.energy);
+        }
+        worst = worst.max(difference.abs());
+    }
+    eprintln!("largest reserve difference: {worst}");
+    // Exact to frame 484 (every event, the 43,200-event first dispatch included);
+    // after that the thrust words differ by a few units (the velocity's rounding),
+    // which moves the spend by at most 6 of about 5,600 units.
+    assert!(worst <= 8, "reserve differs by {worst}");
 }

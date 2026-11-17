@@ -37,7 +37,9 @@ depends on them.
 
 ### 1. Parity blockers (the 2026-10-26 audit; P0 first)
 
-- **P0** `parity-01` fuel, shield and hull repair event units (F938/F929;
+- **P0** `parity-01` fuel, shield and hull repair event units (F938/F929; 17 November: the
+  reserve matches the executed original exactly for the first 300 frames of a
+  flight and within 6 units of about 5,600 to frame 899;
   F152's whole-second events now come from the day fraction and its marker,
   checked against the executed original's `DATA_008808` on 10 November, and
   no F938 while the autopilot flies (F1007's mode 2); the `+0x10e` countdown
