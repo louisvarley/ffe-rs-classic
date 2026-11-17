@@ -352,6 +352,16 @@ asserts under 0.5%. The ship still returns to the system frame at the clear whil
 the original keeps it a child of planet 111; with this fix that has no visible
 effect on the speed.
 
+Checked to the harness's 2000-frame limit (parity-05, 17 November): the original
+never changes frame in that run (the ship is 2.4 km up, the trace is continuous),
+so neither the frame selector the port inhibits (`switch_delay`/`reference_counter`)
+nor a pad return is exercised by it, and nothing there contradicts the inhibition.
+The clear is one 32-unit altitude quantum early (the port's altitude is 251104 at
+frame 429, the original's 251072; F1031's region edge is between them). Past frame
+1300, at set speeds in the millions, the lateral velocity drifts by under one unit
+a frame (port x 1880 against the original's 1490 at frame 1999 while z agrees within 0.1%): sub-unit
+accumulator rounding in a regime ordinary play does not reach.
+
 `tools/reference/headless.c` prints, on stderr only, the player's thrust words,
-limits and rows for frames 161-176, 200 and 260 when `FFE_PLAYER_DUMP` is set (the
+limits and rows for frames 161-176, 200, 260 and 426-436 when `FFE_PLAYER_DUMP` is set (the
 stdout trace and its hashes are unchanged).

@@ -62,7 +62,7 @@
   "implementation": "crates/ffe-rs/src/main.rs:1184,3917,4127,4162; crates/ffe-rs/src/original_flight.rs:206,621",
   "acceptance": "Prove pad release, planet retained, rotating/linear transforms, re-touch, high acceleration and return-to-pad on real ports; compare F1033 altitude and flags. Remove grace only when those traces pass.",
   "dependencies": "PAR-04, flight-9, flight-10",
-  "progress": "2026-10-26: Confirmed omitted F1677 rotation in navigator surface-port positions/orientations. Corrected rotating-to-root conversion removes immediate 680 m false contact altitude. Live handoff no longer uses measured seat climb. Collision grace/frame-selector suppression remain open."
+  "progress": "2026-10-26: Confirmed omitted F1677 rotation in navigator surface-port positions/orientations. Corrected rotating-to-root conversion removes immediate 680 m false contact altitude. Live handoff no longer uses measured seat climb. Collision grace/frame-selector suppression remain open. 2026-11-17: no frame-count grace remains (the station launch's grace ends on F1033's region flag); a 2000-frame takeoff replay never changes frame in the original, so the inhibited selector is untested but not contradicted; the pad clear is one 32-unit altitude quantum early. Needs a long flight that leaves the planet's frame to close."
  },
  {
   "id": "PAR-06",
