@@ -6482,6 +6482,9 @@ int main(int argc, char **argv)
     if (argc >= 4 && !strcmp(argv[1], "--game-frame")) {
         int k;
         game_frame_mode = 1; limit = strtoul(argv[2], 0, 0);
+        /* FFE_START_KEY=<scancode>: the intro's start key (0x02 = start type 1, the Eagle at Ross 154;
+           0x39 = any other key, the default Saker Mk III at Hope). */
+        if (getenv("FFE_START_KEY")) probe_start_key = strtoul(getenv("FFE_START_KEY"), 0, 0);
         for (k = 3; k < argc && game_key_count < 16; ++k) game_keys[game_key_count++] = strtoul(argv[k], 0, 0);
         fprintf(stderr, "JJFFE game-frame-v1: the real game from the new game, scripted keys, final 320x200 frame and palette in game-frame.bin.\n");
         asmmain(0, NULL);

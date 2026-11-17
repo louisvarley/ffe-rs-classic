@@ -281,8 +281,15 @@ was wrong, and the render scale above was the cause. `Screen::draw_beam` now dra
 model 156 at the firing ship's scale and the depth clamp is gone (the Eagle and the
 Saker are both scale 8). `tests/eagle_beam.rs` pins "no fan".
 
-Still different: the port draws a one-pixel ray (about 47 pixels, from (260,120)
-towards (306,157)) that the original does not, and the Saker's beam, whose gun is
-below the view, is now nearly invisible. The reference build always starts the
-Eagle (a `0x39` start key still gives model 23), so the Saker could not be
-compared. Check both against a reference that can start the Saker.
+Saker checked too: `tools/reference/headless.c` now takes `FFE_START_KEY`
+(`0x39` = the default Saker Mk III at Hope, model 31) in `--game-frame` mode, and
+the original draws no beam pixel in the Saker's front view either (0 differing view
+pixels against the unfired run, frames 601-603). So the Saker's nearly invisible
+beam in the port is right, and the streak it showed at scale 17 was wrong.
+
+Still different: for the Eagle the port draws a one-pixel ray (about 47 pixels,
+from (260,120) towards (306,157)) and for the Saker a small mark at the bottom
+right, where the original draws nothing. After a shot the original's `+0x151` byte
+stays `04`, which F1776 would clear if it ran its front-gun branch, so check
+whether F1776 returns early in the front view (and what it tests) before hiding
+those pixels.
