@@ -101,7 +101,7 @@
   "implementation": "crates/ffe-rs/src/main.rs:6390,4674; crates/ffe-rs/src/death.rs:232,288; crates/ffe-rs/src/screen.rs:1784,2641; crates/ffe-core/src/effects.rs:120",
   "acceptance": "Capture non-capsule player death at source event-relative times: removed old ship, correct explosion reference/distance, animated fragments, debris, palette/depth, sounds and 0x3cae6 wait, then tombstone. Identify the blue mesh by model/primitive trace; test crash, laser and missile death separately.",
   "dependencies": "PAR-17, PAR-21, gameplay-25, ui-12",
-  "progress": "2026-10-26: F1105 camera now follows explosion axes/motion, uses source 0xf9000000 external distance and suppresses removed player hull. Effect age, mass-global and lifecycle parity remain open; no claim that blue mesh is fixed."
+  "progress": "2026-10-26: F1105 camera now follows explosion axes/motion, uses source 0xf9000000 external distance and suppresses removed player hull. Effect age, mass-global and lifecycle parity remain open; no claim that blue mesh is fixed. 2026-11-17: re-checked against the executed --death-probe (docs/notes/death.md): the sequence, palette, object kinds, timers and hold match, and the renderer passes the live timer as global 4; what is left is a pixel comparison, which needs the original's RNG state at the death (PAR-17), and separate crash/laser/missile captures."
  },
  {
   "id": "PAR-09",

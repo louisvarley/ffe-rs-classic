@@ -222,6 +222,36 @@ cleared.
   requirement" is therefore the equipment bit (and, for the Stowmaster, the
   two cabins it grants, not consumes).
 
+## Side-by-side with `--death-probe` (2026-11-17, parity-08)
+
+The executed original (`jjffe-smoke --death-probe 1200`, Ross 154 start, hull
+destroyed at frame 250, frames every 21 ms) and the port (`FFE_DEV_DESTROY_AT=0.6
+ffe-rs --dev --start 1 --skip-intro --capture-start <dir> --smoke-frames 299`) were
+compared frame by frame. What matches:
+
+- the sequence: the parked ship vanishes in a flash at the starport, the model-0x9b
+  burst with its twelve fragments grows over the first second, grey smoke puffs
+  (model 0x9e sparks) and debris pods fly, the external camera turns about the
+  burst, and the 0x3cae6 hold (238 frames of 1,043 tics) ends with the tombstone
+  spinning in from far away at about frame 240-260 after the hit;
+- the colours: the harness writes the game's 6-bit VGA palette without the x4
+  scale, which made its PPMs look dark. The station hull is (10, 10, 8) there and
+  (40, 40, 32) in the port: the same colour;
+- the object kinds and word values the earlier probe checks in `effects.rs`: one
+  model-0x9b object (AI 0x1c), model-0x99 pods (AI 0x15, global word 1 = 15 for a
+  wreck pod) and model-0x9e sparks (AI 0x1a, timer falling by tics >> 1), and the
+  timer wrapping when a spark dies.
+
+What cannot be compared: the explosion's orientation, the pod count and every
+spark are drawn from the shared RNG pair, so the external camera (which follows the
+burst's random axes) looks along a different line in each run, and the port's
+counts differ run to run exactly as the original's would (the probe's had one pod
+and a spark per frame from it; the port's test run had none and its first sparks at
+1.15 s). A pixel comparison needs the port's RNG state at the death to equal the
+original's, which is parity-17. The audit's remark that the effects force global 4
+to 0x4000 is out of date: `screen.rs` passes the live timer word. Crash, laser and
+missile deaths have not been captured separately.
+
 ## F1098's derelict (2026-11-03)
 
 When an escape capsule or Stowmaster launches (the automatic death path or the
