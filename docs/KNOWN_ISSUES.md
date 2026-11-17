@@ -196,3 +196,93 @@ station's spun rows (F866) and the ship co-rotates with the station frame
 the ship with the station's orbital motion instead (its frame following), and
 the launch starts at F1088's seat but waits for the door in the lift stages
 rather than parked at the seat (PAR-10).
+
+## Eagle laser beam draws as a red fan (found 2026-11-17; fixed the same day, one-pixel ray left)
+
+Firing any laser in the Eagle (ship 23: the Ross 154 and Sol/Mars starts; the
+Mars start's `0xa0` beam laser shows it most, the pulse does the same) draws a
+red fan at the crosshair instead of a thin ray. The Saker (ship 31) draws a thin
+ray correctly.
+
+Findings so far:
+
+- The Eagle's statistics put the front gun behind the eye: eye `[1500, 30]`,
+  front gun `[1300, 0]` (Saker: eye `[1800, 400]`, gun `[2200, 0]`). So model
+  0x9c (F1776's beam) starts about 0.165 flight units behind the camera. The
+  camera and `combat::gun_origin` use the same scale, so this is the data, not
+  a unit mismatch.
+- `Screen::draw_beam` clamps the render origin to 0.33 in front of the eye
+  (`MIN_RENDER_DEPTH`). With the clamp the fan is small (the screenshot); without
+  it the beam fills the lower half of the view. Neither is the original's thin
+  ray.
+- Polygon near-plane clipping (F1564) is ported and checked
+  (`docs/notes/polygons.md`), so look first at how model 0x9c's ray polygons are
+  built (the flare, the tube, global 4 = laser type, global 37 = length) and at
+  what the original does with a muzzle behind the eye.
+
+To reproduce: a local test that builds `Screen` with `lasers = [0xa0, 0, 0, 0]`,
+sets `screen.beam = combat::beam(..)` for ship 23 and 31, draws a frame and saves
+it (as `tests/laser_view.rs` does with `FFE_SHOT_DIR`). Not fixed; not verified
+against the executed original.
+
+Further findings (same day):
+
+- Model 156's cull radius is 0x800000, so F1680 cannot cull the beam for a
+  muzzle 0.165 units behind the eye. The ~64-unit muzzle cone lies wholly behind
+  the near plane (z <= 0x40) and drops out; what remains is the forward ray.
+- The ray is a strip parallel to the view axis. The Saker's gun is 3200 model
+  units below its eye, so the strip reads as a thin line converging on the
+  crosshair. The Eagle's is only about 240 units below (up word 0 vs eye 30), so
+  the same fixed-width strip, clipped at the near plane, fans out to the screen
+  edges. The geometry is therefore what the ported pipeline gives for these
+  words; the render is not obviously a clipping bug.
+- So the open question is whether the original shows this for the Eagle. Either
+  the original differs in the gun/eye words it uses for the Eagle (check the
+  ShipStats offsets `eye`/`front_gun` and F1776's use of them), or it limits the
+  ray near the camera. Settle it with the executed original (the reference
+  harness in `tools/reference`), not by tuning `MIN_RENDER_DEPTH`.
+
+F1776 read against `ffe-rs-classic/jjffe-master/ffe.asm:111336` (same day): the
+gun position is `(row >> 16) * word >> 12` along the forward row (front gun
+words `+0x20`) plus the up row (`+0x22`), added to the object's 64-bit position
+before F1680 draws model 0x9c, and `ShipStats` reads the same words
+(`+0x18/+0x1a` eye, `+0x20/+0x22` front gun). So `combat::gun_origin` matches
+the source. The remaining difference must be inside the draw of model 0x9c from
+a muzzle behind the eye: next check whether the ray's faces are culled in the
+original (F1480/F1481 observer position; `docs/notes/polygons.md` says the
+port's observer comes from the diagnostic camera) and compare against a
+reference run. No code was changed.
+
+Render scale is the likely cause (same day, from the source and renders):
+
+- F1776 does `F1533(local, object, 0)`, a 0x152-byte `memcpy` of the firing
+  object (the player), changes only the model to 0x9c and calls F1680. F1680
+  and F1683 shift by the object's `+0x7e`, so the beam is drawn at the *copied*
+  `+0x7e`, not necessarily at model 156's own scale (17). F1536 does the same
+  for the hit flash but sets `+0x7e` from the hit ship's model record first; the
+  port copies that (`render_scene_with_scale`, ship scale) but draws the beam at
+  model 156's own scale 17.
+- Experiment (not kept): drawing the beam at the Eagle's/Saker's scale 8 (512x
+  smaller) removes the fan. With the 0.33 clamp the Eagle shows a muzzle flash
+  and a thin ray; with no clamp its ray is a thin line from the bottom toward
+  the target when firing at a ship (`tests/laser_view.rs`), nothing on an empty
+  sky; the Saker's beam becomes almost invisible (its gun is 3200 units below
+  the eye, off the bottom of the view).
+- Open: the player object's `+0x7e` at the moment of the shot (the assembly sets
+  it in several places, e.g. 0 at creation `ffe.asm:71572`, a distance shift at
+  `:70786`). Read it from the executed original, then draw the beam at that
+  scale and drop `MIN_RENDER_DEPTH` if the result matches. No code was changed.
+
+**Fixed (same day).** The executed original (`ffe-rs-classic/.cache/jjffe-reference/
+jjffe-smoke.exe --game-frame <n> 0x02` with `FFE_TAKEOFF=1 FFE_FIRE_AT=600`, the
+Eagle in flight) draws no beam pixel in the 3D view after a shot: the only pixels
+that differ from the unfired run are the message line (rows 184-197). So the fan
+was wrong, and the render scale above was the cause. `Screen::draw_beam` now draws
+model 156 at the firing ship's scale and the depth clamp is gone (the Eagle and the
+Saker are both scale 8). `tests/eagle_beam.rs` pins "no fan".
+
+Still different: the port draws a one-pixel ray (about 47 pixels, from (260,120)
+towards (306,157)) that the original does not, and the Saker's beam, whose gun is
+below the view, is now nearly invisible. The reference build always starts the
+Eagle (a `0x39` start key still gives model 23), so the Saker could not be
+compared. Check both against a reference that can start the Saker.

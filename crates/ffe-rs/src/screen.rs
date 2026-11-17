@@ -1098,10 +1098,16 @@ impl Screen {
     ) {
         let scale = model_scale(scene).unwrap_or(DEFAULT_MODEL_SCALE);
         let rows = beam.axes.map(|axis| camera.direction(axis));
-        // F1776 places the duplicate at the gun and hands it to F1680; the
-        // projection culls anything behind the near plane, so a gun behind
-        // the eye shows only the ray: do not invent a muzzle by clamping z.
-        let origin = camera.point(beam.origin).map(|v| v * scale);
+        // F1776 copies the firing object (`F1533`, 0x152 bytes, including the
+        // render scale `+0x7e`) and only changes the model to 0x9c, so the beam
+        // is drawn at the firing ship's scale, not model 156's own (17), which
+        // is 512 times larger. The Eagle's gun is behind its eye: at the right
+        // scale the muzzle cone is behind the near plane and the thin ray adds
+        // nothing, as in the executed original (no beam pixel in the Eagle's
+        // front view, `docs/KNOWN_ISSUES.md`). The old depth clamp hid the
+        // oversized beam and is gone.
+        let view_origin = camera.point(beam.origin);
+        let origin = view_origin.map(|v| v * scale);
         let light = self.scene_light(scene, camera);
         let mut inputs = AnimationInputs::original(flight_tics(state), 0, &scene.shades());
         inputs.jitter = self.jitter.cursor;
@@ -1113,7 +1119,14 @@ impl Screen {
         inputs.globals[4] = u16::from(self.lasers[beam.mount]);
         inputs.globals[37] = beam.length;
         if let Ok(frame) =
-            scene.render_scene_with(crate::combat::BEAM_MODEL, rows, origin, light, &inputs)
+            scene.render_scene_with_scale(
+                crate::combat::BEAM_MODEL,
+                scene.find(state.ship).map(|model| model.scale),
+                rows,
+                origin,
+                light,
+                &inputs,
+            )
         {
             self.jitter.cursor = frame.jitter;
             self.draw_frame(scene, &frame);
