@@ -20,6 +20,7 @@ extern void ref_laser_fire(unsigned char *object, int mount);
 extern void ref_launch_missile(void);
 extern void ref_damage(unsigned char *object, long damage, void *source);
 extern void ref_launch_request(void *entry);
+extern void ref_autopilot(void);
 extern void ref_service(unsigned char *ship, unsigned long seconds);
 static int service_vectors(void);
 extern unsigned long ref_rng(void);
@@ -582,7 +583,7 @@ static unsigned long flight_launch_frame = 170, flight_thrust_frame = 260;
 static uint64_t flight_previous_hash;
 static const char *flight_scenario_name(void)
 {
-    return flight_scenario == 1 ? "takeoff" : flight_scenario == 2 ? "planet" : flight_scenario == 3 ? "hover" : flight_scenario == 4 ? "keyboard" : flight_scenario == 5 ? "launch" : "idle";
+    return flight_scenario == 1 ? "takeoff" : flight_scenario == 2 ? "planet" : flight_scenario == 3 ? "hover" : flight_scenario == 4 ? "keyboard" : flight_scenario == 5 ? "launch" : flight_scenario == 6 ? "dock" : "idle";
 }
 
 static uint64_t flight_hash_value(uint64_t hash, uint64_t value)
@@ -923,7 +924,7 @@ long InputKeybGetLastKey(void)
     }
     /* Action 9 (launch): the scancode table maps plain Tab (0x0f) to it. One
        edge is enough; F1056's JUMP_004417 handles it. */
-    if (((flight_mode && flight_scenario != 0 && flight_scenario != 5) || misjump_mode || (game_frame_mode && getenv("FFE_TAKEOFF"))) && !flight_launch_sent && frames >= flight_launch_frame) {
+    if (((flight_mode && flight_scenario != 0 && flight_scenario != 5 && flight_scenario != 6) || misjump_mode || (game_frame_mode && getenv("FFE_TAKEOFF"))) && !flight_launch_sent && frames >= flight_launch_frame) {
         flight_launch_sent = 1;
         return 0x0f;
     }
@@ -1270,7 +1271,12 @@ void TimerFrameUpdate(void)
         /* The boot/intro frames, the scripted launch and the free-flight tail.
            Frames before 140 are still covered by `--state`; this trace starts
            where the intro first has a stable mode. */
-        if (flight_scenario == 5 && !flight_launch_sent && frames >= flight_launch_frame) {
+        if (flight_scenario == 6 && flight_launch_sent == 1 && ref_pl_mode == 0 && frames >= flight_launch_frame + 600) {
+            /* in free flight after the launch: target the parent station and engage F1020 */
+            unsigned char *p = (unsigned char *)state_u32(0xc8);
+            if (p) { p[0xca] |= 0x20; /* the docking computer: F1020 refuses without it */ ref_state[0xec] = p[0x56]; p[0xfe] = p[0x56]; flight_launch_sent = 2; ref_autopilot(); fprintf(stderr, "dock: autopilot requested at frame %lu, target %u, mode now %u\n", frames, (unsigned)p[0x56], (unsigned)ref_pl_mode); }
+        }
+        if ((flight_scenario == 5 || flight_scenario == 6) && !flight_launch_sent && frames >= flight_launch_frame) {
             unsigned char entry[0x80] = {0};
             flight_launch_sent = 1;
             ref_launch_request(entry);
@@ -6560,10 +6566,14 @@ int main(int argc, char **argv)
            start docked in an orbital station (--start-key=0x04, the Lave start): F1056's Tab edge does
            nothing in mode 0x2a, so the row's own handler runs instead. */
         else if (!strcmp(argv[2], "launch")) { flight_scenario = 5; flight_thrust_frame = ~0UL; }
-        else fail("unknown --flight scenario (idle, takeoff, planet, hover, keyboard, launch)");
+        /* dock: the launch, then once the ship is in free flight (mode 0) the navigation target
+           (DATA_008804+0xec, the player's parent station) is set and F1020 engages the autopilot,
+           which flies the ship back to the station and runs the docking stages. */
+        else if (!strcmp(argv[2], "dock")) { flight_scenario = 6; flight_thrust_frame = ~0UL; }
+        else fail("unknown --flight scenario (idle, takeoff, planet, hover, keyboard, launch, dock)");
         flight_mode = 1;
         limit = strtoul(argv[3], &end, 10);
-        if (*end || limit < 200 || limit > 2000) fail("invalid --flight frame count");
+        if (*end || limit < 200 || limit > (flight_scenario == 6 ? 20000UL : 2000UL)) fail("invalid --flight frame count");
         fprintf(stderr, "JJFFE flight-v1: the real game from boot; scenario %s, %lu frames, selected player/planet state per frame, no framebuffer.\n",
                 flight_scenario_name(), limit);
         asmmain(0, NULL);

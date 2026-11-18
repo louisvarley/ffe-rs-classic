@@ -474,6 +474,11 @@ impl Stages {
                     } else {
                         self.state = OPEN_DOOR;
                         self.timeout = STAGE_TIMEOUT;
+                        // The new state's view function runs in the frame the movement
+                        // function changed it, so the open-door stage's first decrement
+                        // is this frame's (the executed original's 0xc lasts 125 more
+                        // frames than the touch's frame, not 126).
+                        self.stage(dt, INTO_LIFT, 0x1_8000);
                     }
                 } else {
                     self.timeout -= dt;

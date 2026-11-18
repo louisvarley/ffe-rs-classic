@@ -11,6 +11,13 @@ in the station's frame matches the original's velocity within a unit. The ship l
 the rows the docking stages left, which F1520 normalised to 0.992 of unit length
 (`OriginalFlight::docked_rows`); with exact unit rows its thrust was 0.8% too strong.
 
+**Docking against the executed original (PAR-09).** `--flight dock 12000` (the same start) launches, then sets the
+navigation target to the station and calls F1020 with the docking computer fitted. The autopilot touches the
+slot at frame 7660 (mode 0xa, 440 frames of 0x70000 tics) and the stages 0xc, 0xe, 0x10, 0x12, 0x14, 0x16 and
+0x18 begin on frames 8100, 8225, 8320, 8446, 8572, 8698 and 8824; 0x28 and the docked 0x2a follow on 8916 and
+8917. `Stages::step` matches every frame (the open-door stage's first decrement is the frame the touch's stage
+ends, as F1067's view function runs in the frame the state changes).
+
 `crates/ffe-core/src/traffic.rs`; wired into the playable by `ffe_rs::navigation::Navigator`
 (`request_clearance`, `begin_docking`, `begin_launch`, `tick_traffic`). Read from
 `jjffe-master/ffe.asm` and the `srctools` notes (`cstarport.txt`, `cplayer.txt`, `plstate.txt`).

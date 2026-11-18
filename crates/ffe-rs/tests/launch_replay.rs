@@ -201,3 +201,48 @@ fn the_exit_flight_follows_the_original_frame_by_frame() {
         worst.1 * 100.0
     );
 }
+
+/// The docking stages after the autopilot's touch (`jjffe-smoke --start-key=0x04
+/// --flight dock 12000`: the launch, then F1020's autopilot back to Lave Station):
+/// the original's modes 0xa, 0xc, 0xe, 0x10, 0x12, 0x14, 0x16, 0x18 and then 0x28/0x2a
+/// begin on the frames `ffe_core::traffic::Stages` reaches them from the touch
+/// (PAR-09). Run with `FFE_DOCK_TRACE`.
+#[test]
+#[ignore = "Local-only: needs FFE_DOCK_TRACE"]
+fn the_docking_stages_follow_the_original_frame_by_frame() {
+    use ffe_core::traffic::Stages;
+    let path = std::env::var_os("FFE_DOCK_TRACE").expect("FFE_DOCK_TRACE");
+    let rows: Vec<Row> = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("{\"scenario\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let touch = rows.iter().find(|row| row.mode == 0xa).expect("the original docks").frame;
+    let mut theirs: Vec<(u8, u64)> = Vec::new();
+    for row in rows.iter().filter(|row| row.frame >= touch) {
+        if theirs.last().map(|c| c.0) != Some(row.mode) {
+            theirs.push((row.mode, row.frame));
+        }
+    }
+    let mut stages = Stages::touched(false);
+    let mut ours = vec![(stages.state, touch)];
+    for frame in touch + 1..=rows.last().unwrap().frame {
+        if stages.step(FRAME_TICS as i32, false, 0xffff).is_some()
+            && ours.last().map(|c| c.0) != Some(stages.state)
+        {
+            ours.push((stages.state, frame));
+        }
+    }
+    eprintln!("original: {theirs:x?}");
+    eprintln!("port:     {ours:x?}");
+    // Every stage from the touch to the dock changes on the original's frame.
+    assert_eq!(theirs.len(), ours.len());
+    for ((mode, theirs_frame), (state, ours_frame)) in theirs.iter().zip(&ours) {
+        assert_eq!(
+            (mode, theirs_frame),
+            (state, ours_frame),
+            "stage {mode:#x}: original frame {theirs_frame}, port {state:#x} frame {ours_frame}"
+        );
+    }
+}

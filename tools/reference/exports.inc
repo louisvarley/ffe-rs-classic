@@ -598,6 +598,8 @@ GLOBAL _ref_damage
 _ref_damage equ FUNC_000953
 GLOBAL _ref_launch_request
 _ref_launch_request equ FUNC_000381
+GLOBAL _ref_autopilot
+_ref_autopilot equ FUNC_001020
 
 ; Source autopilot arithmetic oracle (no gameplay or rendering overrides).
 GLOBAL _ref_autopilot_request
