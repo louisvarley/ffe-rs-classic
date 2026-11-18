@@ -126,6 +126,12 @@ fn keyboard_keys(frame: u64) -> OriginalKeys {
 }
 
 /// The port's frames from the launch action on, keyed by the trace's frame number.
+/// The start record the trace was captured from: `FFE_START_TYPE`, 1 (Ross 154, the
+/// harness's default) or 0 (`--start-key=0x39`, Hope).
+fn start_type() -> u8 {
+    std::env::var("FFE_START_TYPE").map_or(1, |v| v.parse().expect("FFE_START_TYPE"))
+}
+
 fn replay(last: u64) -> Vec<(u64, State)> {
     replay_with(last, takeoff_keys, None).0
 }
@@ -142,7 +148,7 @@ fn replay_with(
         &std::fs::read(std::env::var_os("FFE_WORLD_CACHE").expect("FFE_WORLD_CACHE")).unwrap(),
     )
     .unwrap();
-    let mut nav = Navigator::new_game(&cache, 1).unwrap();
+    let mut nav = Navigator::new_game(&cache, start_type()).unwrap();
     let index = nav.docked.expect("landed at the start starport");
     // The executed original's RNG pair changes once in 900 frames of this takeoff
     // (the boot's F688 at frame 162) and never during the climb or the free flight
@@ -187,7 +193,15 @@ fn replay_with(
         ..Flight::default()
     };
     flight.position = start.seat.map(|v| v as f64 / UNITS_PER_FLIGHT_UNIT);
-    flight.axes = Some(body.orientation);
+    // F998's type-0 arm calls F997 after F994: the ship's first and third rows are
+    // reversed, so it faces out of the port (`new_commander` does the same).
+    let mut axes = body.orientation;
+    if start_type() == 0 {
+        for row in [0, 2] {
+            axes[row] = axes[row].map(|v| -v);
+        }
+    }
+    flight.axes = Some(axes);
     // The ship's own statistics (F600's limits), as the game passes them.
     let ship_stats = stats
         .chunks_exact(48)
@@ -255,6 +269,18 @@ fn replay_with(
     let mut altitude;
     for frame in LAUNCH_FRAME + 2..=last {
         NOW.with(|n| n.set(frame));
+        // The harness's test cases, applied at the end of the frame before: the engines
+        // off (`FFE_ENGINES_OFF_AT`, F1056's action 9: `+0xe9` bit 0) and a damaged
+        // thruster (`FFE_LIMITS_CUT_AT`: the six thrust limits halved).
+        let at = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+        if at("FFE_ENGINES_OFF_AT") == Some(frame - 1) {
+            model.set_engines_on(false);
+        }
+        if at("FFE_LIMITS_CUT_AT") == Some(frame - 1) {
+            let mut limits = model.player().limits;
+            limits.axes = limits.axes.map(|axis| axis.map(|v| v / 2));
+            model.set_limits(limits);
+        }
         let keys = keys_for(frame);
         let contact = if model.on_pad() {
             model.step_pad(period(), &keys, tools.as_ref())
@@ -524,6 +550,41 @@ fn hope_seat_matches_the_original() {
     }
 }
 
+/// The launch with no key held (`--flight hover 900`; `FFE_HOVER_TRACE`): the set speed
+/// stays 0, so F1013 hands the climb to 0x26 on altitude alone (frame 292 on the Ross
+/// start, 315 on Hope's) and the ship climbs on F1013's fixed up-thrust (PAR-04).
+#[test]
+#[ignore = "Local-only: needs FFE_WORLD_CACHE and FFE_HOVER_TRACE"]
+fn port_hover_follows_the_original_without_keys() {
+    let reference = trace("FFE_HOVER_TRACE");
+    let last = reference.last().unwrap().frame;
+    let (port, _) = replay_with(last, |_| OriginalKeys::default(), None);
+    let mut changes = (Vec::new(), Vec::new());
+    let mut previous = (None, None);
+    let mut worst = 0i64;
+    for (frame, ours) in &port {
+        let Some(row) = reference.iter().find(|row| row.frame == *frame) else {
+            continue;
+        };
+        assert_eq!(ours.set_speed, row.set_speed, "set speed at frame {frame}");
+        if previous.0 != Some(row.mode) {
+            changes.0.push((row.mode, *frame));
+        }
+        if previous.1 != Some(ours.mode) {
+            changes.1.push((ours.mode, *frame));
+        }
+        previous = (Some(row.mode), Some(ours.mode));
+        if row.mode != 0 && *frame > LAUNCH_FRAME {
+            for axis in 0..3 {
+                worst = worst.max((ours.velocity[axis] - row.velocity[axis]).abs());
+            }
+        }
+    }
+    eprintln!("hover modes: original {:?}, port {:?}; worst velocity difference {worst}", changes.0, changes.1);
+    assert_eq!(changes.0, changes.1, "the hand-off to 0x26 is on the same frame");
+    assert!(worst <= 6, "velocity differs by {worst}");
+}
+
 /// The original's reserve (`+0x11e`, `jjffe-smoke --flight keyboard 900` with
 /// `FFE_RESERVE_DUMP=1`, stderr) against `Flight::player_events` driven by the same
 /// frame clock, thrust words and mode (PAR-01). Run with `FFE_WORLD_CACHE`,
@@ -568,8 +629,8 @@ fn port_reserve_follows_the_original() {
     eprintln!("largest reserve difference: {worst}");
     // Exact to frame 484 (every event, the 43,200-event first dispatch included);
     // after that the thrust words differ by a few units (the velocity's rounding),
-    // which moves the spend by at most 6 of about 5,600 units.
-    assert!(worst <= 8, "reserve differs by {worst}");
+    // which moves the spend by at most 6 (Hope's start: 12) of about 5,600 units.
+    assert!(worst <= 12, "reserve differs by {worst}");
 }
 
 /// The original at an uneven frame rate (PAR-12): `FFE_CLOCK_SKIP=21 jjffe-smoke

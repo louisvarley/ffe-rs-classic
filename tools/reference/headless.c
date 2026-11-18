@@ -1281,6 +1281,19 @@ void TimerFrameUpdate(void)
             flight_launch_sent = 1;
             ref_launch_request(entry);
         }
+        /* Test cases for the takeoff handlers (PAR-04), applied at the end of a frame:
+           FFE_ENGINES_OFF_AT=<frame> sets +0xe9 bit 0 (the engines off, F1056's action 9)
+           and FFE_LIMITS_CUT_AT=<frame> halves the six thrust limits (+0xbc..+0xc6), a
+           damaged thruster's F599 clamp. */
+        {
+            const char *off = getenv("FFE_ENGINES_OFF_AT"), *cut = getenv("FFE_LIMITS_CUT_AT");
+            unsigned char *pl = (unsigned char *)state_u32(0xc8);
+            if (off && frames == strtoul(off, NULL, 0)) ref_state[0xe9] |= 1;
+            if (cut && pl && frames == strtoul(cut, NULL, 0)) {
+                int w;
+                for (w = 0; w < 6; ++w) { short v = (short)get16(pl, 0xbc + 2 * w); v = (short)(v / 2); pl[0xbc + 2 * w] = (unsigned char)(v & 0xff); pl[0xbd + 2 * w] = (unsigned char)((v >> 8) & 0xff); }
+            }
+        }
         if (frames >= 140) flight_trace_row();
         if (frames >= 140 && flight_scenario == 4)
             printf("{\"keyboard\":%lu,\"timer_last\":%lu,\"timer_next\":%lu,\"last_key_count\":%lu}\n",
@@ -6573,7 +6586,7 @@ int main(int argc, char **argv)
         else fail("unknown --flight scenario (idle, takeoff, planet, hover, keyboard, launch, dock)");
         flight_mode = 1;
         limit = strtoul(argv[3], &end, 10);
-        if (*end || limit < 200 || limit > (flight_scenario == 6 ? 20000UL : 2000UL)) fail("invalid --flight frame count");
+        if (*end || limit < 200 || limit > 20000UL) fail("invalid --flight frame count");
         fprintf(stderr, "JJFFE flight-v1: the real game from boot; scenario %s, %lu frames, selected player/planet state per frame, no framebuffer.\n",
                 flight_scenario_name(), limit);
         asmmain(0, NULL);

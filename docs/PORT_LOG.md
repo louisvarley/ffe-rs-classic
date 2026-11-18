@@ -4603,3 +4603,13 @@ the ship's `+0x101` (1 for the Sidewinder-class limit), only F746's final leg is
 an event whose F610 distance shift is 6 or less only requests clearance and leaves the thrust alone.
 Details: `docs/notes/autopilot-source-audit.md`. Still open under PAR-11: obstacle avoidance, the
 accelerated frame match, rotating-parent F589, ship targets.
+
+## 2026-11-18: the Hope launch and the no-key launch replay (PAR-04)
+
+`takeoff_replay.rs` takes `FFE_START_TYPE` (1 Ross, 0 Hope): the type-0 launch (`--start-key=0x39`) matches the
+executed original on modes, set speed and hand-off frames, with velocity within 3 units. The replay had omitted F998's
+F997 (the type-0 ship's rows 0 and 2 reversed), which `new_commander` already applies. `--flight hover 900` (no key
+held) replays on both starts: the hand-off to 0x26 on altitude alone is on the original's frame (315 Hope, 292 Ross).
+Harness: `--flight` accepts up to 20000 frames; `FFE_ENGINES_OFF_AT` and `FFE_LIMITS_CUT_AT` apply the engines-off and
+damaged-thruster cases. Both differ from the port (engines off: a 30-unit velocity step the port lacks, so F1043's
+engines-off request needs reading; halved limits: 0.6% by frame 248), so PAR-04 stays open on those.
