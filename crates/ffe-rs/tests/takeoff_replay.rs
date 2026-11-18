@@ -19,6 +19,38 @@ const LAUNCH_FRAME: u64 = 170;
 const FASTER_FROM: u64 = 260;
 const FRAME_SECONDS: f64 = 0.021;
 
+thread_local! {
+    /// The frame period the replay steps with (the original's 21 ms by default).
+    static PERIOD: std::cell::Cell<f64> = const { std::cell::Cell::new(FRAME_SECONDS) };
+}
+
+thread_local! {
+    /// The original's tics for each frame, when a trace with uneven frames is
+    /// replayed; the frame being stepped.
+    static TICS: std::cell::RefCell<std::collections::HashMap<u64, u32>> = Default::default();
+    static NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This frame's length in milliseconds: the traced one when there is a trace
+/// (`ms * 0x3e2 / 20` tics, so 994 is 20 ms and 1,043 is 21 ms), else the period.
+fn frame_ms() -> u32 {
+    let traced = TICS.with(|t| t.borrow().get(&NOW.with(std::cell::Cell::get)).copied());
+    match traced {
+        Some(tics) => (f64::from(tics) * 20.0 / f64::from(0x3e2_u32)).round() as u32,
+        None => (PERIOD.with(std::cell::Cell::get) * 1000.0).round() as u32,
+    }
+}
+
+fn period() -> f64 {
+    f64::from(frame_ms()) / 1000.0
+}
+
+/// F1418's tics for the current frame: whole milliseconds times 0x3e2, divided
+/// by 20 (1,043 for 21 ms).
+fn frame_tics() -> u32 {
+    frame_ms() * 0x3e2 / 20
+}
+
 #[derive(Deserialize)]
 struct Row {
     frame: u64,
@@ -175,9 +207,11 @@ fn replay_with(
     let mut events = ffe_core::second_events::SecondEvents::new_game();
     let mut reserve: Vec<(u64, u32)> = Vec::new();
     let ship = ship_stats.clone().expect("ship statistics");
-    reserve_state.player_events(events.advance(1043), 0x30, &ship, 0);
-    for _ in 163..=LAUNCH_FRAME + 1 {
-        assert_eq!(events.advance(1043), 0);
+    NOW.with(|n| n.set(162));
+    reserve_state.player_events(events.advance(frame_tics()), 0x30, &ship, 0);
+    for frame in 163..=LAUNCH_FRAME + 1 {
+        NOW.with(|n| n.set(frame));
+        assert_eq!(events.advance(frame_tics()), 0);
     }
     // Parked on the pad until the launch action.
     model.begin_pad_takeoff(
@@ -220,9 +254,10 @@ fn replay_with(
     let mut mode;
     let mut altitude;
     for frame in LAUNCH_FRAME + 2..=last {
+        NOW.with(|n| n.set(frame));
         let keys = keys_for(frame);
         let contact = if model.on_pad() {
-            model.step_pad(FRAME_SECONDS, &keys, tools.as_ref())
+            model.step_pad(period(), &keys, tools.as_ref())
         } else {
             // As the game loop chooses: the body under the ship, and for a
             // starport its planet with the port as F994's sibling.
@@ -234,7 +269,7 @@ fn replay_with(
             if parent.kind == ffe_rs::navigation::Kind::Starport {
                 let ground = nav.bodies[parent.parent.unwrap()].clone();
                 model.step_starport_landing(
-                    FRAME_SECONDS,
+                    period(),
                     &keys,
                     &landing_body(&ground, &read(ground.model)),
                     ground.position,
@@ -245,7 +280,7 @@ fn replay_with(
                 )
             } else {
                 model.step_landing(
-                    FRAME_SECONDS,
+                    period(),
                     &keys,
                     &landing_body(&parent, &read(parent.model)),
                     parent.position,
@@ -289,7 +324,7 @@ fn replay_with(
         mode = model.mode();
         altitude = i64::from(model.player().altitude);
         rows.push((frame, state(&model, mode, altitude)));
-        let due = events.advance(1043);
+        let due = events.advance(frame_tics());
         if due != 0 {
             let thrust = reserve_state.thrust_sum(model.thrust_words());
             reserve_state.player_events(due, model.mode(), &ship, thrust);
@@ -535,4 +570,77 @@ fn port_reserve_follows_the_original() {
     // after that the thrust words differ by a few units (the velocity's rounding),
     // which moves the spend by at most 6 of about 5,600 units.
     assert!(worst <= 8, "reserve differs by {worst}");
+}
+
+/// The original at an uneven frame rate (PAR-12): `FFE_CLOCK_SKIP=21 jjffe-smoke
+/// --flight takeoff 900` makes every other frame 20 ms (994 tics) instead of 21
+/// ms (1,043), and the replay steps each frame with the tics its row shows.
+/// Run with `FFE_WORLD_CACHE` and `FFE_TAKEOFF_SKEW_TRACE`.
+#[test]
+#[ignore = "Local-only: needs FFE_WORLD_CACHE and FFE_TAKEOFF_SKEW_TRACE"]
+fn port_takeoff_replays_an_uneven_frame_rate() {
+    #[derive(Deserialize)]
+    struct Timed {
+        frame: u64,
+        tics: u32,
+    }
+    let path = std::env::var_os("FFE_TAKEOFF_SKEW_TRACE").expect("FFE_TAKEOFF_SKEW_TRACE");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let timed: Vec<Timed> = text
+        .lines()
+        .filter(|line| line.starts_with("{\"scenario\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    TICS.with(|t| *t.borrow_mut() = timed.iter().map(|row| (row.frame, row.tics)).collect());
+    let reference = trace("FFE_TAKEOFF_SKEW_TRACE");
+    let last = reference.last().unwrap().frame;
+    let port = replay(last);
+    TICS.with(|t| t.borrow_mut().clear());
+    let length = |v: [i64; 3]| v.iter().map(|c| (*c as f64).powi(2)).sum::<f64>().sqrt();
+    let (mut worst_altitude, mut worst_speed, mut worst_frame) = (0.0f64, 0.0f64, 0u64);
+    let mut changes = (Vec::new(), Vec::new());
+    let mut previous = (None, None);
+    for (frame, ours) in &port {
+        let Some(row) = reference.iter().find(|row| row.frame == *frame) else {
+            continue;
+        };
+        if previous.0 != Some(row.mode) {
+            changes.0.push((row.mode, *frame));
+        }
+        if previous.1 != Some(ours.mode) {
+            changes.1.push((ours.mode, *frame));
+        }
+        previous = (Some(row.mode), Some(ours.mode));
+        assert_eq!(ours.set_speed, row.set_speed, "set speed at frame {frame}");
+        if row.altitude > 20_000 {
+            let error = (ours.altitude - row.altitude).abs() as f64 / row.altitude as f64;
+            if error > worst_altitude {
+                worst_frame = *frame;
+            }
+            worst_altitude = worst_altitude.max(error);
+        }
+        let speed = length(row.velocity);
+        if speed > 500.0 {
+            worst_speed = worst_speed.max((length(ours.velocity) - speed).abs() / speed);
+        }
+    }
+    eprintln!("modes: original {:?}, port {:?}", changes.0, changes.1);
+    eprintln!(
+        "uneven frames: worst altitude difference {:.2}% (frame {}), worst speed difference {:.2}%",
+        worst_altitude * 100.0,
+        worst_frame,
+        worst_speed * 100.0
+    );
+    // The altitude is F1033's, in 32-unit steps that jump at F1013's hand-off (the
+    // worst frame, 263, is two frames after it); the velocity is the flight model's.
+    assert!(worst_altitude < 0.025 && worst_speed < 0.005);
+    for (theirs, ours) in changes.0.iter().zip(&changes.1) {
+        assert!(
+            theirs.0 == ours.0 && theirs.1 - ours.1.min(theirs.1) <= 1 && ours.1 <= theirs.1,
+            "mode {:#x}: original frame {}, port frame {}",
+            theirs.0,
+            theirs.1,
+            ours.1
+        );
+    }
 }

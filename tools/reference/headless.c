@@ -927,6 +927,18 @@ ULONG TimerGetTimeStamp(void)
 {
     if (++clock_reads > 1000000) fail("clock-read bound exceeded");
     if (vector_mode) return milliseconds;
+    {
+        /* FFE_CLOCK_SKIP=<n>: every n-th read does not advance the clock (n > 0) or
+           advances it by two milliseconds (n < 0), so a frame that makes 21 reads takes
+           20 or 22 ms instead: the same game at another frame rate (PAR-12). */
+        static long skip;
+        static int skip_read;
+        static unsigned long reads;
+        if (!skip_read) { skip_read = 1; skip = getenv("FFE_CLOCK_SKIP") ? strtol(getenv("FFE_CLOCK_SKIP"), 0, 10) : 0; }
+        ++reads;
+        if (skip > 0 && reads % (unsigned long)skip == 0) return milliseconds;
+        if (skip < 0 && reads % (unsigned long)(-skip) == 0) { milliseconds += 2; return milliseconds - 2; }
+    }
     return milliseconds++;
 }
 void TimerSleep(void) { ++milliseconds; }
