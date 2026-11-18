@@ -6855,6 +6855,9 @@ fn run() -> Result<(), String> {
                 ) {
                     ffe_rs::damage::Heat::Rose { heat, warn } => {
                         state.hull_heat = heat;
+                    // The docking stages left the rows through F1520 (0.992 of unit
+                    // length); F1088 only zeroes the motion (PAR-10).
+                    model.docked_rows();
                         if warn {
                             pending_log.add(Source::Combat, ffe_rs::damage::HEAT_WARNING);
                         }

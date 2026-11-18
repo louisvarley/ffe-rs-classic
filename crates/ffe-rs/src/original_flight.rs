@@ -819,6 +819,15 @@ impl OriginalFlight {
         self.player.motion.orientation = rows.map(|row| row.map(q));
     }
 
+    /// F1520 on the ship's rows, as the docking stages leave them: the right and forward
+    /// rows normalised through F1519 (0.992 of unit length, the constant `0x3f800000`), the
+    /// up row their cross product. A ship launched from an orbital station keeps these rows
+    /// (F1088 only zeroes its motion), which is why its thrust is 0.8% weaker than a unit
+    /// matrix's.
+    pub fn docked_rows(&mut self) {
+        self.player.motion.renormalise();
+    }
+
     /// Turn the ship to face a point (keeping it level against the system's y axis).
     pub fn face(&mut self, target: [i64; 3]) {
         let at = self.absolute_position();

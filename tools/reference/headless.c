@@ -19,6 +19,7 @@ extern unsigned long ref_pl_frame_tics;
 extern void ref_laser_fire(unsigned char *object, int mount);
 extern void ref_launch_missile(void);
 extern void ref_damage(unsigned char *object, long damage, void *source);
+extern void ref_launch_request(void *entry);
 extern void ref_service(unsigned char *ship, unsigned long seconds);
 static int service_vectors(void);
 extern unsigned long ref_rng(void);
@@ -581,7 +582,7 @@ static unsigned long flight_launch_frame = 170, flight_thrust_frame = 260;
 static uint64_t flight_previous_hash;
 static const char *flight_scenario_name(void)
 {
-    return flight_scenario == 1 ? "takeoff" : flight_scenario == 2 ? "planet" : flight_scenario == 3 ? "hover" : flight_scenario == 4 ? "keyboard" : "idle";
+    return flight_scenario == 1 ? "takeoff" : flight_scenario == 2 ? "planet" : flight_scenario == 3 ? "hover" : flight_scenario == 4 ? "keyboard" : flight_scenario == 5 ? "launch" : "idle";
 }
 
 static uint64_t flight_hash_value(uint64_t hash, uint64_t value)
@@ -747,6 +748,16 @@ static void flight_trace_row(void)
            position[0], position[1], position[2],
            velocity[0], velocity[1], velocity[2],
            (unsigned long long)previous, (unsigned long long)hash);
+    if (player && getenv("FFE_ROWS_DUMP")) {
+        /* stderr only: the player's parent (+0x56), frame flag (+0x57), orientation rows and the
+           parent object's door word (+0x9e) and rows when there is one. */
+        unsigned char *parent = player[0x56] && ref_pl_object_list ? (unsigned char *)ref_pl_object_list + 0x74 + player[0x56] * 0x152 : NULL;
+        fprintf(stderr, "{\"rows\":%lu,\"mode\":%u,\"parent\":%u,\"rotating\":%u,\"door\":%u,\"pos\":[%lld,%lld,%lld],\"v\":[%ld,%ld,%ld],\"r\":[", frames, (unsigned)ref_pl_mode, (unsigned)player[0x56], (unsigned)player[0x57], parent ? (unsigned)get16(parent, 0x9e) : 0, get64(player, 0x3e), get64(player, 0x46), get64(player, 0x4e), (long)get32(player, 0x8c), (long)get32(player, 0x90), (long)get32(player, 0x94));
+        for (axis = 0; axis < 9; ++axis) fprintf(stderr, "%s%ld", axis ? "," : "", (long)get32(player, 4 * axis));
+        fprintf(stderr, "],\"thrust\":[%d,%d,%d],\"limits\":[%d,%d,%d,%d,%d,%d],\"parent_r\":[", (short)get16(player, 0xb6), (short)get16(player, 0xb8), (short)get16(player, 0xba), (short)get16(player, 0xbc), (short)get16(player, 0xbe), (short)get16(player, 0xc0), (short)get16(player, 0xc2), (short)get16(player, 0xc4), (short)get16(player, 0xc6));
+        for (axis = 0; axis < 9; ++axis) fprintf(stderr, "%s%ld", axis ? "," : "", parent ? (long)get32(parent, 4 * axis) : 0L);
+        fprintf(stderr, "]}\n");
+    }
     if (player && getenv("FFE_RESERVE_DUMP")) {
         /* stderr only: the reserve F929 spends (+0x11e), the shield and hull words F938 recharges
            and repairs (+0xe0, +0xe2, +0xe4), the hull temperature (DATA_008804+0x1ec), the
@@ -912,7 +923,7 @@ long InputKeybGetLastKey(void)
     }
     /* Action 9 (launch): the scancode table maps plain Tab (0x0f) to it. One
        edge is enough; F1056's JUMP_004417 handles it. */
-    if (((flight_mode && flight_scenario != 0) || misjump_mode || (game_frame_mode && getenv("FFE_TAKEOFF"))) && !flight_launch_sent && frames >= flight_launch_frame) {
+    if (((flight_mode && flight_scenario != 0 && flight_scenario != 5) || misjump_mode || (game_frame_mode && getenv("FFE_TAKEOFF"))) && !flight_launch_sent && frames >= flight_launch_frame) {
         flight_launch_sent = 1;
         return 0x0f;
     }
@@ -1259,6 +1270,11 @@ void TimerFrameUpdate(void)
         /* The boot/intro frames, the scripted launch and the free-flight tail.
            Frames before 140 are still covered by `--state`; this trace starts
            where the intro first has a stable mode. */
+        if (flight_scenario == 5 && !flight_launch_sent && frames >= flight_launch_frame) {
+            unsigned char entry[0x80] = {0};
+            flight_launch_sent = 1;
+            ref_launch_request(entry);
+        }
         if (frames >= 140) flight_trace_row();
         if (frames >= 140 && flight_scenario == 4)
             printf("{\"keyboard\":%lu,\"timer_last\":%lu,\"timer_next\":%lu,\"last_key_count\":%lu}\n",
@@ -6540,7 +6556,11 @@ int main(int argc, char **argv)
         /* keyboard: the takeoff launch with Return/Shift on keyboard_down()'s
            schedule, reported through an emulation of the platform layer. */
         else if (!strcmp(argv[2], "keyboard")) { flight_scenario = 4; flight_thrust_frame = ~0UL; }
-        else fail("unknown --flight scenario (idle, takeoff, planet, hover, keyboard)");
+        /* launch: the services screen's Launch Request row (F381) called at the launch frame, for a
+           start docked in an orbital station (--start-key=0x04, the Lave start): F1056's Tab edge does
+           nothing in mode 0x2a, so the row's own handler runs instead. */
+        else if (!strcmp(argv[2], "launch")) { flight_scenario = 5; flight_thrust_frame = ~0UL; }
+        else fail("unknown --flight scenario (idle, takeoff, planet, hover, keyboard, launch)");
         flight_mode = 1;
         limit = strtoul(argv[3], &end, 10);
         if (*end || limit < 200 || limit > 2000) fail("invalid --flight frame count");

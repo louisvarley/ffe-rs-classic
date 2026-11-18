@@ -1,5 +1,16 @@
 # Traffic control and the docking and launch stages (F649-F657, F867, F1025, F1067-F1088)
 
+**Launch against the executed original (2026-11-18, PAR-10).** `jjffe-smoke
+--start-key=0x04 --flight launch 1200` starts docked in Lave Station (mode 0x2a) and
+calls F381, the Launch Request row, at frame 170 (F1056's Tab does nothing in 0x2a). The
+original's modes begin on frames 170 (0x1a), 262 (0x1c), 388 (0x1e), 514 (0x20), 640 (0x22),
+735 (0x36, the ship parked at (0, 0, 0x10000) in the station's frame) and 861 (0x26, the
+door word 0), then 1090 (0). `tests/launch_replay.rs` shows `Navigator::tick_traffic`
+changes stage on exactly those frames and releases on 861, and that `OriginalFlight`'s exit
+in the station's frame matches the original's velocity within a unit. The ship leaves with
+the rows the docking stages left, which F1520 normalised to 0.992 of unit length
+(`OriginalFlight::docked_rows`); with exact unit rows its thrust was 0.8% too strong.
+
 `crates/ffe-core/src/traffic.rs`; wired into the playable by `ffe_rs::navigation::Navigator`
 (`request_clearance`, `begin_docking`, `begin_launch`, `tick_traffic`). Read from
 `jjffe-master/ffe.asm` and the `srctools` notes (`cstarport.txt`, `cplayer.txt`, `plstate.txt`).
