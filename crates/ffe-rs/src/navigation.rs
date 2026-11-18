@@ -7043,7 +7043,8 @@ impl Navigator {
         } else {
             [0; 3]
         };
-        let modifier = if self.final_leg { -2 } else { 0 };
+        // F742 hands F610 the ship's `+0x101`; F746's final leg is the constant -2.
+        let modifier = if self.final_leg { -2 } else { flight.ai_modifier() };
         let mut guidance = if station {
             flight.guidance(point, velocity, modifier)
         } else {
@@ -7138,6 +7139,10 @@ impl Navigator {
                     self.autopilot_notice(text);
                 }
             }
+            // F742 runs F599 and F587 only above a distance shift of 6: on this
+            // event F745 asks for clearance and the thrust, caps and turn words
+            // the last event set stay.
+            return Some((flight.held_guidance(), Some(body)));
         }
         Some((guidance, Some(body)))
     }

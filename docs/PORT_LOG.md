@@ -1,5 +1,20 @@
 # Port log
 
+## 2026-11-17 - Far bodies are dots (Gateway's other planets), cache v35
+
+- Gateway's other planets (Gateway 1, 2, 4, 5, 6) did not show from Hope: they were drawn as models a hundredth of a pixel across.
+  The original's F1680 draws a body as a dot from its model's dot class and not at all past its far class; the port now does the
+  same. Read from `jjffe-master/ffe.asm` (F1680 at 101877, F1700 at 103407, F1801/F1802, F1609): the object flag recomputes a finer
+  size, maps it through `DATA_007825` to a sprite record of -7..0 and draws the halo and core sprites.
+- Cache v35 adds `base:world/object-dots` (sprites, size map and every model's far class, dot class and colour). The floppy 1.02
+  bytes were checked against the executable and the source; `ffe-tools build-data` refuses a floppy cache without them.
+- Assumptions: a system body's object scale (`+0x7e`) is 0 (only dust and effects set it); CD 1.01 and shareware 1.06 take the
+  floppy's distances from `DATA_007835` and drop the asset if it does not validate; a lit body nine pixels or more across at its dot
+  class (the original's shaded sphere) still draws its model. Pixel parity with the executed original is not measured: only the
+  data, the decision (verified through `setup_object`, 32 original dots) and the glint's shape and colour against a screenshot.
+- Tests: `ffe-core/tests/model_dot.rs` (object dots), `ffe-rs/tests/far_objects.rs` (descriptor values and the Gateway frame,
+  local-only). The unsupported cache version in the format tests moved from 35 to 36.
+
 ## 2026-11-17 - Station docking cap, launch orientation, start locations
 
 - Manual flight at high time acceleration no longer docks instantly: the station cap of EXP-021 now applies without the autopilot (not on a surface takeoff).
@@ -4577,3 +4592,14 @@ FFED3D source is cloned locally into `ffed3d-master/` from
 ## 2026-11-05: owner overrides and upscaled cockpit sheets
 
 Imported FFED3D art now resolves loose owner files, then packed owner files, then FFED3D, independently for each file. Panel/model meshes, skins and placement metadata share that resolver. Navigation/battle sheets and icon/void sheets sample native resolution with original normalized rectangles. Regressions cover stale packs, per-file fallback, imported mesh/skin/placement/panel overrides, non-integer upscales and source rectangles; actual owner navigation and battle sheets were captured in the dashboard harness.
+
+## 2026-11-18: the player's autopilot approach replays the executed original (PAR-11)
+
+`--flight dock` records the original's whole 6,570-frame approach (frames 1090-7660) to the
+Lave Station clearance point. The port's `source_command` now follows it within 0.2% of the 4.1 km
+leg on every frame (`launch_replay.rs`, FFE_DOCK_POSES). Three fixes: the AI runs once per
+whole-second event and holds its command between events (first event frame 1104); F742's modifier is
+the ship's `+0x101` (1 for the Sidewinder-class limit), only F746's final leg is the constant -2; and
+an event whose F610 distance shift is 6 or less only requests clearance and leaves the thrust alone.
+Details: `docs/notes/autopilot-source-audit.md`. Still open under PAR-11: obstacle avoidance, the
+accelerated frame match, rotating-parent F589, ship targets.

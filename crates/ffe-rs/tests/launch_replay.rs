@@ -246,3 +246,141 @@ fn the_docking_stages_follow_the_original_frame_by_frame() {
         );
     }
 }
+
+/// The approach leg (PAR-11): the original's autopilot, engaged on frame 1090 with the
+/// ship 1,039,351 mm out along the station's axis, flies out, turns round and comes in
+/// to the clearance point (modes 2, frames 1090 to 7660). Start the port's
+/// `Navigator::source_command` from the original's pose and compare every frame.
+///
+/// Run with `FFE_WORLD_CACHE=<data.bin> FFE_DOCK_POSES=<dock-poses.jsonl>`.
+#[test]
+#[ignore = "Local-only: needs FFE_WORLD_CACHE and FFE_DOCK_POSES"]
+fn the_autopilot_approach_follows_the_original_frame_by_frame() {
+    use ffe_rs::navigation::{landing_body, PLAYER};
+    use ffe_rs::original_flight::{Keys, OriginalFlight};
+    #[derive(Deserialize)]
+    struct Pose {
+        rows: u64,
+        mode: u8,
+        pos: [i64; 3],
+        v: [i32; 3],
+        r: [i32; 9],
+        thrust: [i16; 3],
+    }
+    let cache = ffe_content::read(
+        &std::fs::read(std::env::var_os("FFE_WORLD_CACHE").expect("FFE_WORLD_CACHE")).unwrap(),
+    )
+    .unwrap();
+    let path = std::env::var_os("FFE_DOCK_POSES").expect("FFE_DOCK_POSES");
+    let poses: Vec<Pose> = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("{\"rows\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let start = poses.iter().find(|p| p.mode == 2).unwrap();
+    let mut nav = Navigator::new_game(&cache, 3).unwrap();
+    let index = nav.docked.unwrap();
+    // The first advance repositions the bodies for the world clock; do it before the ship is placed.
+    nav.advance(&cache, 1.0);
+    let records = cache.asset("base:model/records").unwrap();
+    let raw = cache.asset("base:ship/stats").unwrap();
+    let (state, _) = ffe_rs::boot::new_commander(&cache, &nav).unwrap();
+    let stats = ffe_rs::boot::ship_stats(&cache, state.ship).unwrap();
+    let info = ffe_core::objects::ModelInfo::read(records, raw, state.ship).unwrap();
+    let station = nav.bodies[index].clone();
+    let station_body = landing_body(
+        &station,
+        &ffe_core::objects::ModelInfo::read(records, raw, station.model).unwrap(),
+    );
+    let library = ffe_rs::navigation::Library(&cache);
+    let tools = cache
+        .asset("base:terrain/tables")
+        .zip(cache.asset("base:terrain/maps"))
+        .map(|(terrain_table, terrain_maps)| ffe_core::surface::SurfaceTools {
+            shapes: &library,
+            terrain_table,
+            terrain_maps,
+            detail: 0,
+        });
+    let mut model = OriginalFlight::from_flight(&state, Some(&stats));
+    model.set_collision_radius(info.radii().1);
+    let axis = station.orientation[2];
+    let at = |z: f64| -> [i64; 3] {
+        std::array::from_fn(|k| station.position[k] + (axis[k] * z).round() as i64)
+    };
+    model.place(at(start.pos[2] as f64), start.r);
+    model.leave_hyperspace(start.v);
+    nav.starport(index).release(PLAYER);
+    nav.docked = None;
+    nav.lock(index);
+    nav.engage_locked().unwrap();
+    let local = |nav: &Navigator, p: [i64; 3]| -> f64 {
+        let now = &nav.bodies[index];
+        (0..3)
+            .map(|k| (p[k] - now.position[k]) as f64 * now.orientation[2][k])
+            .sum()
+    };
+    let verbose = std::env::var_os("FFE_TAKEOFF_VERBOSE").is_some();
+    // F152's whole-second events: the new game's first dispatch is frame 162, then
+    // every 1,043-tic frame adds to the day fraction. F1007 runs the AI states (F741..F746)
+    // from the event, after the frame's flight step: the thrust it sets first acts on the
+    // next frame.
+    let mut events = ffe_core::second_events::SecondEvents::new_game();
+    let mut event_frames = std::collections::BTreeSet::new();
+    events.advance(FRAME_TICS);
+    for frame in 163..=poses.last().unwrap().rows {
+        if events.advance(FRAME_TICS) != 0 {
+            event_frames.insert(frame);
+        }
+    }
+    // F1020 only sets the state: the thrust words the launch flight left stay until the first event.
+    model.apply_guidance(ffe_core::autopilot::Guidance {
+        thrust: start.thrust,
+        cap: [0; 3],
+        turns: [0; 3],
+        distance_shift: 0,
+    });
+    let mut worst = 0.0f64;
+    let mut ended = None;
+    for pose in poses.iter().filter(|p| p.rows >= start.rows && p.mode == 2) {
+        let ours = local(&nav, model.absolute_position());
+        // The error against the farthest point of the leg (4.1 km out).
+        let error = (ours - pose.pos[2] as f64).abs() / 4_100_000.0;
+        worst = worst.max(error);
+        if verbose && (pose.rows % 100 == 0 || error > 0.005) {
+            eprintln!(
+                "frame {}: original z {} v {} thrust {:?}; port z {:.0} v {} thrust {:?}; error {:.2}%",
+                pose.rows, pose.pos[2], pose.v[2], pose.thrust, ours, model.player().motion.velocity[2],
+                model.thrust_words(), error * 100.0
+            );
+        }
+        nav.advance(&cache, FRAME_SECONDS);
+        let moved = nav.follow(model.absolute_position());
+        if let Some(moved) = moved {
+            model.shift(moved);
+        }
+        if event_frames.contains(&pose.rows) {
+            let Some((guidance, _)) = nav.source_command(&cache, &mut model) else {
+                ended = Some(pose.rows);
+                break;
+            };
+            if verbose && pose.rows < 1700 {
+                eprintln!("event {}: guidance {guidance:?}", pose.rows);
+            }
+            model.apply_guidance(guidance);
+        }
+        let result = model.step_station(
+            FRAME_SECONDS,
+            &Keys::default(),
+            &station_body,
+            station.position,
+            &info,
+            tools.as_ref(),
+        );
+        assert!(result.is_ok(), "frame {}: {result:?}", pose.rows);
+    }
+    eprintln!("approach: worst error {:.3}% of the 4.1 km leg over {} frames", worst * 100.0, poses.len());
+    assert!(ended.is_none(), "the port's autopilot ended at {ended:?}");
+    assert!(worst < 0.005, "the approach differs from the original");
+}

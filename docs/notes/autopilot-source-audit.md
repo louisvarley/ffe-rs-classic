@@ -77,3 +77,28 @@ planetary ports or rotating stations.
 **Conclusion:** this is a source-guidance replacement and a set of concrete
 approach/clearance fixes, not a claim that all autopilot source parity is done.
 The remaining gaps must stay visible in the burndown.
+
+## Replay against the executed original — 18 November 2026
+
+`--flight dock` engages the original's autopilot on frame 1090, 1,039,351 mm out on
+the Lave Station axis (station frame, nothing but z moves), and records every frame to
+the clearance hand-off at 7660. `launch_replay.rs`
+`the_autopilot_approach_follows_the_original_frame_by_frame` starts the port's
+`Navigator::source_command` from that pose and compares every frame: the worst
+difference is 0.2% of the 4.1 km leg (8 m at the end). The replay found three rules
+the earlier tests could not:
+
+- **Event cadence.** F1007 runs the AI states (F741-F746) from F152's whole-second
+  event, after the flight step. F1020 only sets mode 2: the launch flight's thrust word
+  (332) stays until the first event (frame 1104), then every 47-48 frames
+  (1,043-tic frames, 49,710 tics per event). Thrust, caps and turn words hold between
+  events. The player loop now calls the controller only after a frame that had an event.
+- **The ship's modifier.** F742 hands F610 `ship+0x101`, set at creation from the x
+  thrust limit (`ffe.asm:3601-3617`: 2 from 0x1329, 1 from 0xaa5, else 0; 1 for this
+  ship). The port passed 0. F746's final leg is the constant -2, not -2 plus the byte.
+- **The clearance event.** When F610's distance shift is 6 or less, F742 skips F599 and
+  F587 and F745 only asks for clearance; the thrust stays as the last event left it.
+
+What this does not cover: F610/F802 obstacle avoidance, the accelerated near-offset
+frame match, rotating-parent F589, ship targets and the hand-off from mode 2 to 0xa
+(frame 7660), which the docking-stage replay starts from.

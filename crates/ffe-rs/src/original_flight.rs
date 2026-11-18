@@ -112,6 +112,11 @@ pub struct OriginalFlight {
     /// This frame's F1014 ran (F1021 in mode 0, F1019 in mode 2, after the
     /// scan): the speed word its heat uses.
     atmosphere: Option<u32>,
+    /// `ship+0x101`, the AI's guidance modifier F742/F746 hand to F610: the
+    /// creation code (`ffe.asm:3601-3617`) sets 2 for a ship whose x limit
+    /// (`+0xbc`) is at least 0x1329, 1 for one of at least 0xaa5 and 0 below.
+    /// Damage changes the limits later, not this byte.
+    ai_modifier: i32,
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -248,6 +253,11 @@ impl OriginalFlight {
             gear_word: 0xffff,
             speed_word: 0,
             atmosphere: None,
+            ai_modifier: match limits.axes[0][0] {
+                0x1329.. => 2,
+                0xaa5.. => 1,
+                _ => 0,
+            },
         }
     }
 
@@ -1040,6 +1050,23 @@ impl OriginalFlight {
         )
     }
 
+    /// The command the AI last installed, which F742 leaves in place on an
+    /// event that only runs a state change (F745's clearance request): it
+    /// applies F599 and F587 only while F610's distance shift is above 6.
+    pub fn held_guidance(&self) -> ffe_core::autopilot::Guidance {
+        self.guidance.unwrap_or(ffe_core::autopilot::Guidance {
+            thrust: self.player.motion.thrust,
+            cap: self.player.motion.cap,
+            turns: self.player.motion.autopilot,
+            distance_shift: 0,
+        })
+    }
+
+    /// `ship+0x101`: F742's modifier for F610. F746's final leg is the constant -2.
+    pub fn ai_modifier(&self) -> i32 {
+        self.ai_modifier
+    }
+
     pub fn body_guidance(
         &self,
         target: [i64; 3],
@@ -1052,7 +1079,7 @@ impl OriginalFlight {
             target,
             velocity,
             &self.player.limits,
-            0,
+            self.ai_modifier,
             radius,
         )
     }

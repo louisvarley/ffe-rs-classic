@@ -1409,6 +1409,10 @@ fn run() -> Result<(), String> {
     if loaded.is_some() && !options.dev {
         original = Some(ffe_rs::boot::resume_model(&cache, &state,
             nav.as_ref().ok_or("Source save has no navigator.")?, acceleration)?);
+    // F152's whole-second events of the last frame: F1007 runs the autopilot's AI
+    // states (F741-F746) from the event, after the flight step, so the command it
+    // sets first acts on the next frame and holds until the next event.
+    let mut autopilot_events = 0u32;
     }
     if options.skip_intro {
         eprintln!("--skip-intro: the logo sequence and the credits are not shown.");
@@ -5438,7 +5442,17 @@ fn run() -> Result<(), String> {
                         .then(|| ffe_rs::prefs::STATION_APPROACH_KM[prefs.station_approach]);
                     nav.starport_approach_km = (prefs.starport_approach > 0)
                         .then(|| ffe_rs::prefs::STARPORT_APPROACH_KM[prefs.starport_approach]);
-                    if let Some((guidance, _body)) = nav.source_command(&cache, model) {
+                    let flying = nav.autopilot_engaged()
+                        && nav.sequence.is_none()
+                        && !nav.landed_view()
+                        && model.player().mode != 0x2e;
+                    if flying && autopilot_events == 0 {
+                        // Between events the thrust words, caps and turn words stay
+                        // (F1020 itself only sets the state: the first second keeps
+                        // what the ship was doing).
+                        model.apply_guidance(model.held_guidance());
+                        keys = OriginalKeys::default();
+                    } else if let Some((guidance, _body)) = nav.source_command(&cache, model) {
                         model.apply_guidance(guidance);
                         keys = OriginalKeys::default();
                     } else {
@@ -7102,6 +7116,7 @@ fn run() -> Result<(), String> {
                                     );
                                     let outcome = nav.damage_ship_at(id, damage, Some(hit.point));
                                     if let Some(attack) = outcome {
+        autopilot_events = event_seconds;
                                         state.credits = state.credits.saturating_add(attack.bounty);
                                         let mut text = match attack.damage {
                                             ffe_core::laser::Damage::Shields => format!(
