@@ -87,6 +87,15 @@ fn returning_to_intro_drops_the_flight_star_tint() {
     let mut screen = Screen::new(&cache).unwrap();
     let mut viewer = ModelViewer::new(&cache).unwrap();
     let default = viewer.shades();
+    let star_shades =
+        ffe_core::model_lighting::star_shades(cache.asset("base:lighting/star-shades").unwrap())
+            .unwrap();
+    for (class, expected) in star_shades.iter().enumerate() {
+        viewer.set_star_class(Some(class as u8));
+        assert_eq!(viewer.shades(), *expected, "star class {class}");
+    }
+    viewer.set_star_class(Some(0x81));
+    assert_eq!(viewer.shades(), star_shades[1], "Ross 154's flagged class");
     let tics = 180 << 10;
     viewer.begin_intro();
     screen.draw_intro(Some(&viewer), tics, false).unwrap();

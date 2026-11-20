@@ -268,16 +268,15 @@ impl GameAudio {
         Self::new(AudioEngine::system(MusicLibrary::from_game_dir(game_dir)))
     }
 
-    /// The normal game engine with the cache's decoded effects and every cached
-    /// song. `cache` is the verified game content; its `base:effect/*` WAVs are
-    /// turned into the 16-voice mixer's sample set, and `base:music/<name>`
-    /// seeds the matching song index. A v29 cache carries all 17; a v28 cache
-    /// carries only song 0 (`qqfront`) and the player's `MUSIC/` folder supplies
-    /// the rest; a v27 cache has no songs.
-    pub fn from_cache(game_dir: impl AsRef<Path>, cache: &VerifiedCache) -> Self {
-        Self::new(AudioEngine::system_with_effects(
-            cached_music(game_dir, cache),
+    /// The normal game engine with the cache's decoded effects and the
+    /// launcher's pre-rendered `music.bin`. Missing bundles are reported; the
+    /// launcher owns first-run generation.
+    pub fn from_cache(root: impl AsRef<Path>, cache: &VerifiedCache) -> Self {
+        let root = root.as_ref();
+        Self::new(AudioEngine::system_with_effects_from_music_bin(
+            cached_music(root, cache),
             cached_effects(cache),
+            &root.join("music.bin"),
         ))
     }
 

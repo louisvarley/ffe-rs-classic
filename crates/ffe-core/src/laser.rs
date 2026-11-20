@@ -10,7 +10,7 @@
 //!
 //! The values here are the original's tables (`DATA_007208`, `DATA_007209`) and
 //! its word arithmetic. The cosmetic sound sample numbers are kept for the
-//! caller, which does not yet play them.
+//! caller, which plays them on a successful shot (`docs/notes/sound-cues.md`).
 use crate::ffp::{self, Ffp};
 use crate::model_animation::{shift_vector, vector_msb};
 use crate::model_math;

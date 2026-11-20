@@ -118,6 +118,9 @@ struct Options {
     /// modelled in `ffe_rs::front_end`; its drawing is not wired into the boot
     /// yet, so the new game currently starts directly.
     skip_intro: bool,
+    /// `--videos DIR`: the folder of the CD videos. Without it the game folder's
+    /// own `DATA` folder is used when it has any.
+    videos: Option<PathBuf>,
     /// Directory for one frame of every preference page plus a flight frame
     /// showing the selected space colour; exits without opening a window.
     capture_prefs: Option<PathBuf>,
@@ -156,6 +159,7 @@ fn options() -> Result<Options, String> {
     let mut boot = Boot::NewGame(ffe_rs::navigation::DEFAULT_START_TYPE);
     let mut boot_given = false;
     let mut skip_intro = false;
+    let mut videos: Option<PathBuf> = None;
     let mut capture_prefs = None;
     let mut capture_intro = None;
     let mut capture_display = None;
@@ -201,6 +205,10 @@ fn options() -> Result<Options, String> {
                 }
                 Boot::NewGame(start_type)
             };
+        } else if arg == "--videos" && videos.is_none() {
+            videos = Some(PathBuf::from(
+                args.next().ok_or("--videos requires a directory")?,
+            ));
         } else if arg == "--skip-intro" && !skip_intro {
             skip_intro = true;
         } else if arg == "--dev" && !dev {
@@ -271,8 +279,9 @@ fn options() -> Result<Options, String> {
             smoke_frames = Some(frames);
         } else {
             return Err(format!(
-                "Unknown argument {}. Usage: ffe-rs [--game <game files folder>] [--root <data folder>] [--start 0..5|sol] [--skip-intro] [--dev] [--load SAVE.json] [--smoke-frames 1..300] [--capture DIR] [--capture-planet DIR] [--capture-traffic DIR] [--capture-start DIR] [--capture-prefs DIR] [--capture-intro DIR] [--capture-display DIR] [--capture-gameover DIR] [--capture-save DIR] [--record FILE] [--replay FILE [--replay-exit]]",
-                arg.to_string_lossy()
+                "Unknown argument {}. {}",
+                arg.to_string_lossy(),
+                ffe_rs::cli::USAGE
             ));
         }
     }
@@ -313,6 +322,7 @@ fn options() -> Result<Options, String> {
         capture_start,
         boot,
         skip_intro,
+        videos,
         capture_prefs,
         capture_intro,
         capture_display,
@@ -471,6 +481,9 @@ fn config_from_prefs(prefs: &Prefs, previous: &settings::Config) -> settings::Co
     settings::Config {
         modern: prefs.modern,
         display: prefs.display,
+        // The launcher's start-in-full-screen choice; the in-game toggle is
+        // session-only and never written back.
+        fullscreen: previous.fullscreen,
         space_colour: prefs.space_colour,
         shape_detail: prefs.shape_detail,
         others: prefs.others,
@@ -507,8 +520,12 @@ fn apply_save(
     *nav = new_nav;
     *commander = loaded.commander;
     *acceleration = loaded.acceleration;
-    *original = Some(ffe_rs::boot::resume_model(cache, state,
-        nav.as_ref().ok_or("Source save has no navigator.")?, *acceleration)?);
+    *original = Some(ffe_rs::boot::resume_model(
+        cache,
+        state,
+        nav.as_ref().ok_or("Source save has no navigator.")?,
+        *acceleration,
+    )?);
     *dock = DockState::default();
     if state.mode == ffe_rs::flight::Mode::Docked
         && nav.as_ref().is_some_and(|nav| nav.docked.is_some())
@@ -752,25 +769,54 @@ enum IntroExit {
 /// 68419-68428 and 68484).
 #[allow(clippy::too_many_arguments)]
 fn run_load_picker(
-    window: &mut display::GameWindow, presenter: &mut Presenter, display: &ffe_rs::display::DisplaySettings,
-    screen: &mut Screen, scene: Option<&ModelViewer>, save_dir: &Path,
-    session: &mut Session, tics: u32,
+    window: &mut display::GameWindow,
+    presenter: &mut Presenter,
+    display: &ffe_rs::display::DisplaySettings,
+    screen: &mut Screen,
+    scene: Option<&ModelViewer>,
+    save_dir: &Path,
+    session: &mut Session,
+    tics: u32,
 ) -> Result<Option<PathBuf>, String> {
-    let mut paths = saves::numbered_saves(save_dir).unwrap_or_default();
-    paths.reverse();
-    let quick = saves::quick_path(save_dir);
-    if quick.is_file() { paths.insert(0, quick); }
+    let paths = saves::all_saves(save_dir).unwrap_or_default();
     let mut selected = 0usize;
-    let mut detail = "LOAD COMMANDER: UP/DOWN, ENTER; ESC BACK".to_owned();
+    let mut detail = "Up/Down, Enter to load; Esc to go back".to_owned();
     let mut last = Instant::now();
+    let _ = (scene, tics);
     while window.is_open() && !session.should_exit() {
-        screen.draw_intro(scene, tics, false)?;
-        let first = selected.saturating_sub(8);
-        let rows: Vec<_> = paths.iter().enumerate().skip(first).take(18)
-            .map(|(i, path)| (path.file_name().unwrap_or_default().to_string_lossy().into_owned(), i == selected, false)).collect();
-        screen.draw_nav_list(&rows, if paths.is_empty() { "NO COMMANDER SAVES. ESC BACK" } else { &detail });
+        let first = selected.saturating_sub(10);
+        let rows: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(11)
+            .map(|(i, path)| {
+                (
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    i == selected,
+                )
+            })
+            .collect();
+        screen.draw_pref_list(
+            "Load Commander",
+            if paths.is_empty() {
+                "No commander saves."
+            } else {
+                "Saved commanders:"
+            },
+            &rows,
+            if paths.is_empty() {
+                "Esc to go back"
+            } else {
+                &detail
+            },
+        );
         presenter.present(window, screen.logical_pixels(), display)?;
-        let dt = last.elapsed().as_secs_f64().min(0.1); last = Instant::now();
+        let dt = last.elapsed().as_secs_f64().min(0.1);
+        last = Instant::now();
         let inp = session.frame(window, dt);
         for key in inp.get_keys_pressed(KeyRepeat::No) {
             match key {
@@ -786,6 +832,191 @@ fn run_load_picker(
         }
     }
     Ok(None)
+}
+
+/// The save menu's name entry. The text box starts with `default_name` and the
+/// player can delete it and type another; `.json` follows it and cannot be
+/// edited. Enter saves under that name (a bad or taken name stays in the box with
+/// the reason), Escape goes back to the preference pages.
+#[allow(clippy::too_many_arguments)]
+fn run_save_prompt(
+    window: &mut display::GameWindow,
+    presenter: &mut Presenter,
+    display: &ffe_rs::display::DisplaySettings,
+    screen: &mut Screen,
+    save_dir: &Path,
+    session: &mut Session,
+    default_name: String,
+) -> Result<Option<String>, String> {
+    let mut name = default_name;
+    let mut detail = "Type a name; Enter saves, Esc goes back".to_owned();
+    let mut last = Instant::now();
+    let mut blink = 0.0f64;
+    while window.is_open() && !session.should_exit() {
+        screen.draw_pref_textbox(
+            "Save Commander",
+            "Name for the new save:",
+            &name,
+            saves::SAVE_EXTENSION,
+            blink % 1.0 < 0.5,
+            &detail,
+        );
+        presenter.present(window, screen.logical_pixels(), display)?;
+        let dt = last.elapsed().as_secs_f64().min(0.1);
+        last = Instant::now();
+        blink += dt;
+        let input = session.frame(window, dt);
+        let shift = input.is_key_down(Key::LeftShift) || input.is_key_down(Key::RightShift);
+        for key in input.get_keys_pressed(KeyRepeat::Yes) {
+            match key {
+                Key::Escape => return Ok(None),
+                Key::Backspace => {
+                    name.pop();
+                    detail = "Type a name; Enter saves, Esc goes back".to_owned();
+                }
+                Key::Enter | Key::NumPadEnter => {
+                    if let Some(reason) = saves::save_name_error(&name) {
+                        detail = reason.to_owned();
+                    } else if saves::named_path(save_dir, &name).is_ok_and(|path| path.exists()) {
+                        detail = format!("A save named {name} already exists.");
+                    } else {
+                        return Ok(Some(name));
+                    }
+                }
+                key => {
+                    if let Some(character) = input::save_name_char(key, shift) {
+                        if name.chars().count() < saves::MAX_SAVE_NAME {
+                            name.push(character);
+                            detail = "Type a name; Enter saves, Esc goes back".to_owned();
+                        } else {
+                            detail = "That name is too long.".to_owned();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Delete an existing quick or numbered commander save. Enter twice confirms;
+/// Escape backs out of confirmation or returns to the preference pages.
+#[allow(clippy::too_many_arguments)]
+fn run_delete_picker(
+    window: &mut display::GameWindow,
+    presenter: &mut Presenter,
+    display: &ffe_rs::display::DisplaySettings,
+    screen: &mut Screen,
+    scene: Option<&ModelViewer>,
+    save_dir: &Path,
+    session: &mut Session,
+    tics: u32,
+) -> Result<Option<PathBuf>, String> {
+    let mut paths = saves::all_saves(save_dir).unwrap_or_default();
+    let mut selected = 0usize;
+    let mut confirming = false;
+    let mut last = Instant::now();
+    let _ = (scene, tics);
+    while window.is_open() && !session.should_exit() {
+        let rows: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .skip(selected.saturating_sub(10))
+            .take(11)
+            .map(|(index, path)| {
+                (
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    index == selected,
+                )
+            })
+            .collect();
+        let detail = if paths.is_empty() {
+            "Esc to go back"
+        } else if confirming {
+            "Delete the selected save? Enter confirms; Esc cancels"
+        } else {
+            "Up/Down, Enter to delete; Esc to go back"
+        };
+        screen.draw_pref_list(
+            "Delete Commander",
+            if paths.is_empty() {
+                "No commander saves."
+            } else {
+                "Saved commanders:"
+            },
+            &rows,
+            detail,
+        );
+        presenter.present(window, screen.logical_pixels(), display)?;
+        let dt = last.elapsed().as_secs_f64().min(0.1);
+        last = Instant::now();
+        let input = session.frame(window, dt);
+        for key in input.get_keys_pressed(KeyRepeat::No) {
+            match key {
+                Key::Escape => {
+                    if confirming {
+                        confirming = false;
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                Key::Up => {
+                    confirming = false;
+                    selected = selected.saturating_sub(1);
+                }
+                Key::Down => {
+                    confirming = false;
+                    selected = (selected + 1).min(paths.len().saturating_sub(1));
+                }
+                Key::Enter if paths.get(selected).is_some() && confirming => {
+                    let path = paths.remove(selected);
+                    saves::delete_save(save_dir, &path)?;
+                    return Ok(Some(path));
+                }
+                Key::Enter if paths.get(selected).is_some() => confirming = true,
+                _ => {}
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Confirm a destructive new-commander reset from the live preference menu.
+#[allow(clippy::too_many_arguments)]
+fn confirm_new_game(
+    window: &mut display::GameWindow,
+    presenter: &mut Presenter,
+    display: &ffe_rs::display::DisplaySettings,
+    screen: &mut Screen,
+    scene: Option<&ModelViewer>,
+    session: &mut Session,
+    tics: u32,
+) -> Result<bool, String> {
+    let mut last = Instant::now();
+    let _ = (scene, tics);
+    while window.is_open() && !session.should_exit() {
+        screen.draw_pref_list(
+            "New Game",
+            "Start a new commander?",
+            &[],
+            "Enter confirms; Esc cancels",
+        );
+        presenter.present(window, screen.logical_pixels(), display)?;
+        let dt = last.elapsed().as_secs_f64().min(0.1);
+        last = Instant::now();
+        let input = session.frame(window, dt);
+        for key in input.get_keys_pressed(KeyRepeat::No) {
+            match key {
+                Key::Enter => return Ok(true),
+                Key::Escape => return Ok(false),
+                _ => {}
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -822,7 +1053,16 @@ fn run_intro(
             // The original's title has a Commander Load choice (F220/F222); the
             // port's front end is the intro, so L is its Load Commander key.
             if key == Key::L {
-                if let Some(path) = run_load_picker(window, presenter, display, screen, scene.as_deref(), save_dir, session, tics)? {
+                if let Some(path) = run_load_picker(
+                    window,
+                    presenter,
+                    display,
+                    screen,
+                    scene.as_deref(),
+                    save_dir,
+                    session,
+                    tics,
+                )? {
                     sound.leave_front_end();
                     return Ok(IntroExit::Load(path));
                 }
@@ -836,7 +1076,16 @@ fn run_intro(
             };
             match action {
                 IntroAction::Load => {
-                    if let Some(path) = run_load_picker(window, presenter, display, screen, scene.as_deref(), save_dir, session, tics)? {
+                    if let Some(path) = run_load_picker(
+                        window,
+                        presenter,
+                        display,
+                        screen,
+                        scene.as_deref(),
+                        save_dir,
+                        session,
+                        tics,
+                    )? {
                         sound.leave_front_end();
                         return Ok(IntroExit::Load(path));
                     }
@@ -902,7 +1151,7 @@ fn write_save_capture(cache: &ffe_content::VerifiedCache, dir: &Path) -> Result<
         ..Flight::default()
     };
     nav.legal.wanted = true;
-    nav.legal.alert = true;
+    nav.legal.set_chase(1);
     nav.legal.offences = 2;
     nav.legal.fines[1] = 6000;
     nav.clock += 4_000.0;
@@ -990,72 +1239,32 @@ fn write_save_capture(cache: &ffe_content::VerifiedCache, dir: &Path) -> Result<
 /// F1094's exit speed along the system's z axis (`+0x94` = 0x71b7, about 2.8 km/s).
 const HYPERSPACE_EXIT_SPEED: i32 = 0x71b7;
 
-/// The highest time acceleration step (100x) within a world's terrain sphere.
-const NEAR_WORLD_ACCELERATION: usize = 2;
-
-/// Port rule (see DEVIATIONS EXP-021): the highest time step the ship may run
-/// at near a station or starport, with the station's name. `moved` is the
-/// distance the ship covered in one frame at 1x. The step may not carry it more
-/// than an eighth of the way to the nearest one in a frame, and is held to 100x
-/// within 50 station radii, 10x within 10 and 1x within 2. `None` when no
-/// step needs holding.
-fn station_acceleration_cap(
-    bodies: &[ffe_rs::navigation::Body],
-    at: [i64; 3],
-    moved: f64,
-) -> Option<(usize, String)> {
-    let (name, gap, radius) = bodies
-        .iter()
-        .filter(|body| matches!(body.kind, NavKind::Station | NavKind::Starport))
-        .map(|body| {
-            let gap =
-                (ffe_rs::navigation::distance(at, body.position) - body.radius as f64).max(0.0);
-            (body.name.clone(), gap, body.radius.max(1) as f64)
-        })
-        .min_by(|a, b| a.1.total_cmp(&b.1))?;
-    let mut cap = ffe_rs::console::TIME_ACCELERATION.len() - 1;
-    let floor = if gap < 2.0 * radius {
-        0
-    } else if gap < 10.0 * radius {
-        1
-    } else if gap < 50.0 * radius {
-        2
-    } else {
-        cap
-    };
-    cap = cap.min(floor);
-    while cap > 0 {
-        let factor = f64::from(ffe_rs::console::TIME_ACCELERATION[cap])
-            / f64::from(ffe_rs::console::TIME_ACCELERATION[0]);
-        if moved * factor * 8.0 <= gap {
-            break;
-        }
-        cap -= 1;
-    }
-    (cap < ffe_rs::console::TIME_ACCELERATION.len() - 1).then_some((cap, name))
-}
-
 fn run() -> Result<(), String> {
     let options = options()?;
     let cache = std::sync::Arc::new(load_content(&options.game)?);
-    // The CD release's videos, when the launcher has copied them to FMVs: the
-    // station screens show them as JJFFE's F120 does (`ffe_rs::fmv`).
-    let fmv_library =
-        match ffe_rs::fmv::Library::find(&options.root, &cache.manifest().source_profile) {
-            Ok(Some(library)) => {
-                eprintln!(
-                    "CD videos: {} clips in {}.",
-                    library.len(),
-                    library.dir().display()
-                );
-                Some(library)
-            }
-            Ok(None) => None,
-            Err(error) => {
-                eprintln!("CD videos not used: {error}");
-                None
-            }
-        };
+    // The CD's videos, read where they are: the folder the launcher chose
+    // (`--videos`), else the game folder's own `DATA` folder; the station
+    // screens show them as JJFFE's F120 does (`ffe_rs::fmv`).
+    let fmv_library = match ffe_rs::fmv::locate(
+        &options.root,
+        &options.game,
+        options.videos.as_deref(),
+        &cache.manifest().source_profile,
+    ) {
+        Ok(Some(library)) => {
+            eprintln!(
+                "CD videos: {} clips in {}.",
+                library.len(),
+                library.dir().display()
+            );
+            Some(library)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("CD videos not used: {error}");
+            None
+        }
+    };
     let mut screen = Screen::new(&cache)?;
     // Diagnostic frames of the preference pages and of the space colour, for
     // the port's screenshot comparisons. No window is opened.
@@ -1143,6 +1352,8 @@ fn run() -> Result<(), String> {
         .unwrap_or(config);
     prefs.modern = config.modern;
     prefs.display = config.display;
+    // A replay never starts full screen: it must open like the recording did.
+    prefs.fullscreen = config.fullscreen && !session.replaying();
     prefs.space_colour = config.space_colour;
     prefs.shape_detail = config.shape_detail;
     prefs.others = config.others;
@@ -1184,6 +1395,17 @@ fn run() -> Result<(), String> {
     let mut map_drag: Option<(i32, i32)> = None;
     // The map's `DATA_005100` page selection (F834/F840). Reset when the map opens.
     let mut map_console = ffe_rs::console::MapConsole::default();
+    // The page the map's F7-F10 icons show over the map (F842/F843): the body
+    // diagram and the system's texts, built when the key is pressed.
+    let mut map_page: Option<ffe_rs::map_pages::Page> = None;
+    // Picture mode's zoom in sectors to a pixel (`DATA_008966`, 1 to 255).
+    let mut sky_zoom = 1i32;
+    // The original's 3D system map (module 5, `docs/notes/system-map.md`): the
+    // page, the star it shows when that is not this system (with the clock it
+    // was made at), and whether a right-button turn is in progress.
+    let mut system_map: Option<ffe_rs::system_map::SystemMap> = None;
+    let mut system_map_source: Option<(ffe_rs::navigation::Entry, [u32; 2])> = None;
+    let mut system_map_drag: Option<(i32, i32)> = None;
     let sector_tables = cache
         .asset("base:world/galaxy-tables")
         .and_then(|bytes| ffe_core::sector::Tables::new(bytes).ok());
@@ -1221,11 +1443,6 @@ fn run() -> Result<(), String> {
     let mut acceleration = 0usize;
     // The jump under way (F908's mode 4), for F1094's arrival.
     let mut in_transit: Option<ffe_rs::navigation::Jumped> = None;
-    // The step the near-world hold lowered, restored once clear of the world.
-    let mut held_acceleration: Option<usize> = None;
-    // Where the ship was last frame and the time step it moved at (the station
-    // rule's speed estimate).
-    let mut ship_moved: Option<([i64; 3], usize)> = None;
     // F2's status/equipment page (`F1120`, `DATA_008871 & 8`).
     let mut status_page = false;
     // F5's console icon (action 0xf5): the parked ship's engines/equipment page. Off by
@@ -1274,6 +1491,10 @@ fn run() -> Result<(), String> {
     let mut beam_time = 0.0f64;
     // A landed ship's pose in its body's axes, and that body.
     let mut landed_pose: Option<(usize, ffe_rs::original_flight::LandedPose)> = None;
+    // F152's whole-second events of the last frame: F1007 runs the autopilot's AI
+    // states (F741-F746) from the event, after the flight step, so the command it
+    // sets first acts on the next frame and holds until the next event.
+    let mut autopilot_events = 0u32;
     // The sine table F1675 builds the dust's orientation with.
     let dust_sine = cache
         .asset("base:math/sine")
@@ -1407,12 +1628,12 @@ fn run() -> Result<(), String> {
         }
     }
     if loaded.is_some() && !options.dev {
-        original = Some(ffe_rs::boot::resume_model(&cache, &state,
-            nav.as_ref().ok_or("Source save has no navigator.")?, acceleration)?);
-    // F152's whole-second events of the last frame: F1007 runs the autopilot's AI
-    // states (F741-F746) from the event, after the flight step, so the command it
-    // sets first acts on the next frame and holds until the next event.
-    let mut autopilot_events = 0u32;
+        original = Some(ffe_rs::boot::resume_model(
+            &cache,
+            &state,
+            nav.as_ref().ok_or("Source save has no navigator.")?,
+            acceleration,
+        )?);
     }
     if options.skip_intro {
         eprintln!("--skip-intro: the logo sequence and the credits are not shown.");
@@ -1740,7 +1961,6 @@ fn run() -> Result<(), String> {
                 status_next = 0;
                 equipment_scroll = 0;
                 in_transit = None;
-                held_acceleration = None;
                 landed_pose = None;
                 gear_warned = false;
                 beam_time = 0.0;
@@ -2150,7 +2370,9 @@ fn run() -> Result<(), String> {
                 model.move_pad_bodies(pad.planet, pad.planet_rows, pad.station, pad.station_rows);
                 if let Some(index) = nav.docked.filter(|_| nav.on_pad()) {
                     if let Some(seat) = nav.parked_pad_seat(index, model.collision_radius()) {
-                        let reverse = nav.new_game.is_some_and(|start| !matches!(start.start_type, 1..=3));
+                        let reverse = nav
+                            .new_game
+                            .is_some_and(|start| !matches!(start.start_type, 1..=3));
                         model.pin_pad_seat(seat, nav.bodies[index].rows, reverse);
                     }
                 }
@@ -2234,6 +2456,7 @@ fn run() -> Result<(), String> {
         // the page picture change. The original stops the clock in FUNC_000220.
         if prefs.open {
             let before = prefs.clone();
+            let mut menu_action = Activate::None;
             if active {
                 let key = [
                     (Key::Up, PrefsKey::Up),
@@ -2247,20 +2470,188 @@ fn run() -> Result<(), String> {
                 .find(|(key, _)| pressed(*key))
                 .map(|(_, action)| action);
                 if let Some(key) = key {
-                    if prefs.key(key) == Activate::Quit {
-                        return Ok(());
-                    }
+                    menu_action = prefs.key(key);
                 }
             }
             if let Some((x, y)) = edge_point {
-                match prefs.click(x, y) {
-                    Activate::Quit => return Ok(()),
-                    Activate::Close => {
-                        held_controls.disarm(&keys_down);
-                        message = "Returned to the game.".to_owned();
-                    }
-                    Activate::None => {}
+                menu_action = prefs.click(x, y);
+            }
+            match menu_action {
+                Activate::Quit => return Ok(()),
+                Activate::Close => {
+                    held_controls.disarm(&keys_down);
+                    message = "Returned to the game.".to_owned();
                 }
+                Activate::Save => {
+                    let default_name = saves::default_save_name(&save_dir);
+                    if let Some(name) = run_save_prompt(
+                        &mut window,
+                        &mut presenter,
+                        &prefs.display,
+                        &mut screen,
+                        &save_dir,
+                        &mut session,
+                        default_name,
+                    )? {
+                        let save = build_save(
+                            &commander,
+                            &state,
+                            nav.as_ref(),
+                            original.is_some(),
+                            acceleration,
+                        );
+                        match saves::save_named(&save_dir, &name, &save) {
+                            Ok(path) => {
+                                message = format!(
+                                    "Saved {}.",
+                                    path.file_name().unwrap_or_default().to_string_lossy()
+                                );
+                                prefs.open = false;
+                            }
+                            Err(error) => message = format!("SAVE ERROR: {error}"),
+                        }
+                    }
+                }
+                Activate::Load => {
+                    if let Some(path) = run_load_picker(
+                        &mut window,
+                        &mut presenter,
+                        &prefs.display,
+                        &mut screen,
+                        scene.as_ref(),
+                        &save_dir,
+                        &mut session,
+                        frame.tics,
+                    )? {
+                        match saves::load_game(&path).and_then(|loaded| {
+                            apply_save(
+                                &cache,
+                                scene.as_ref(),
+                                loaded,
+                                &mut state,
+                                &mut nav,
+                                &mut original,
+                                &mut dock,
+                                &mut acceleration,
+                                &mut commander,
+                                &mut message,
+                            )
+                        }) {
+                            Ok(()) => {
+                                prefs.open = false;
+                                views = ViewState::default();
+                                gameover = None;
+                                gameover_viewer = None;
+                                last_mode = state.mode;
+                                launch_grace = None;
+                                reset_transition_input(
+                                    &mut held_controls,
+                                    &inp.get_keys(),
+                                    &mut held_since,
+                                    &mut mouse_accumulator,
+                                    &mut mouse_point,
+                                    &mut mouse_was_down,
+                                    &mut right_was_down,
+                                );
+                            }
+                            Err(error) => message = format!("LOAD ERROR: {error}"),
+                        }
+                    }
+                }
+                Activate::Delete => {
+                    if let Some(path) = run_delete_picker(
+                        &mut window,
+                        &mut presenter,
+                        &prefs.display,
+                        &mut screen,
+                        scene.as_ref(),
+                        &save_dir,
+                        &mut session,
+                        frame.tics,
+                    )? {
+                        message = format!(
+                            "Deleted {}.",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        );
+                        prefs.open = false;
+                    }
+                }
+                Activate::NewGame => {
+                    if confirm_new_game(
+                        &mut window,
+                        &mut presenter,
+                        &prefs.display,
+                        &mut screen,
+                        scene.as_ref(),
+                        &mut session,
+                        frame.tics,
+                    )? {
+                        let new_nav =
+                            Navigator::new_game(&cache, ffe_rs::navigation::DEFAULT_START_TYPE)?;
+                        let (new_state, model) = ffe_rs::boot::new_commander(&cache, &new_nav)?;
+                        state = new_state;
+                        nav = Some(new_nav);
+                        original = Some(model);
+                        commander = saves::Commander::default();
+                        views = ViewState::default();
+                        dock = DockState::default();
+                        acceleration = 0;
+                        gameover = None;
+                        gameover_viewer = None;
+                        status_page = false;
+                        screen = Screen::new(&cache)?;
+                        log_channel = Channel::default();
+                        pending_log = PendingLog::default();
+                        last_prompt.clear();
+                        last_dock_screen = None;
+                        reopen_board = false;
+                        script_ships.clear();
+                        script_clock = None;
+                        script_watched = None;
+                        journal_issue = None;
+                        issue_scroll = ffe_rs::journal_page::Scroll::open();
+                        issue_action = None;
+                        issue_clock = 0.0;
+                        script_text_cache = Default::default();
+                        status_spin = 0.0;
+                        station_eye = false;
+                        pad_board = false;
+                        fmv_player = None;
+                        fmv_arrival = true;
+                        fmv_was_docked = false;
+                        fmv_screen = None;
+                        was_docked = nav.as_ref().is_some_and(|nav| nav.docked.is_some());
+                        accumulator = 0.0;
+                        frame_timer = ffe_core::FrameTimer::default();
+                        engines_page = false;
+                        status_section = 0;
+                        status_next = 0;
+                        equipment_scroll = 0;
+                        in_transit = None;
+                        landed_pose = None;
+                        gear_warned = false;
+                        beam_time = 0.0;
+                        targeter = ffe_rs::targeter::Arming::default();
+                        launch_grace = None;
+                        galaxy = None;
+                        parked_galaxy = None;
+                        paused = false;
+                        labels = false;
+                        prefs.open = false;
+                        message = "New game.".to_owned();
+                        reset_transition_input(
+                            &mut held_controls,
+                            &inp.get_keys(),
+                            &mut held_since,
+                            &mut mouse_accumulator,
+                            &mut mouse_point,
+                            &mut mouse_was_down,
+                            &mut right_was_down,
+                        );
+                        last_mode = state.mode;
+                    }
+                }
+                Activate::None => {}
             }
             // F150/F216: a page action beeps and any Sound Effects change is
             // applied to the player immediately.
@@ -2331,6 +2722,9 @@ fn run() -> Result<(), String> {
         // F120 ends a video on any key or click (and hands it on).
         let fmv_input =
             !inp.get_keys_pressed(KeyRepeat::No).is_empty() || (mouse_down && !mouse_was_down);
+        // The mouse-down edge, kept for the map pages below: `mouse_was_down` is
+        // already this frame's state by then.
+        let mouse_edge = mouse_down && !mouse_was_down;
         mouse_was_down = mouse_down;
         // The acceleration meter and the screen buttons: the 6 7 8 9 0 keys give the
         // meter's steps as the original's FUNC_000208 maps them.
@@ -2349,7 +2743,6 @@ fn run() -> Result<(), String> {
             Some(Click::Acceleration(step)) => Some(step),
             _ => digit_step,
         };
-        let surface_takeoff = nav.as_ref().is_some_and(|nav| nav.takeoff.is_some());
         if let Some(requested) = chosen_step {
             // A time step resumes a paused game, as the pause button and P do.
             if paused {
@@ -2370,82 +2763,44 @@ fn run() -> Result<(), String> {
                 );
             }
         }
-        // The near-world cap is only used for autopilot travel; the player's
-        // time selection follows F208, including a surface takeoff. The station
-        // cap also holds manual flight, so a high step cannot skip the slot.
-        if chosen_step.is_some() {
-            held_acceleration = None;
-        }
-        if let (Some(model), Some(nav)) = (original.as_mut(), nav.as_ref()) {
-            let at = model.absolute_position();
-            let flying = state.mode == ffe_rs::flight::Mode::Flight
-                && !model.on_pad()
-                && nav.landed_state().is_none();
-            let world = nav
-                .bodies
-                .iter()
-                .find(|body| {
-                    matches!(body.kind, NavKind::Planet | NavKind::Moon)
-                        && ffe_rs::navigation::distance(at, body.position) <= body.radius as f64
-                })
-                .filter(|_| flying);
-            // Port rule: how far the ship went last frame, at 1x. A station is
-            // a small target, so the step may not carry the ship more than an
-            // eighth of the way to it in one frame (and is held lower still
-            // close in). The chosen step comes back once the way is clear.
-            let moved =
-                ship_moved
-                    .filter(|_| flying)
-                    .map_or(0.0, |(before, step): ([i64; 3], usize)| {
-                        ffe_rs::navigation::distance(before, at)
-                            / f64::from(ffe_rs::console::TIME_ACCELERATION[step])
-                            * f64::from(ffe_rs::console::TIME_ACCELERATION[0])
-                    });
-            ship_moved = Some((at, acceleration));
-            let station = flying
-                .then(|| station_acceleration_cap(&nav.bodies, at, moved))
-                .flatten();
-            let cap = ffe_rs::console::safety_acceleration_cap(
-                nav.autopilot_engaged(),
-                surface_takeoff,
-                world.map(|_| NEAR_WORLD_ACCELERATION),
-                station.as_ref().map(|(step, _)| *step),
-            );
-            let wanted = held_acceleration.unwrap_or(acceleration);
-            match cap {
-                Some(cap) if wanted > cap => {
-                    held_acceleration = Some(wanted);
-                    if acceleration != cap {
-                        acceleration = cap;
-                        model.set_time_acceleration(acceleration);
-                        let near = station
-                            .filter(|(step, _)| *step == cap)
-                            .map(|(_, name)| name)
-                            .or_else(|| world.map(|world| world.name.clone()))
-                            .unwrap_or_default();
-                        message = format!(
-                            "Time acceleration held at {} near {}.",
-                            ACCELERATION_NAMES[acceleration], near
-                        );
-                    }
-                }
-                _ => {
-                    if let Some(step) = held_acceleration.take() {
-                        if cap.is_none_or(|cap| step <= cap) {
-                            acceleration = step;
-                            model.set_time_acceleration(acceleration);
-                            message = format!("Time acceleration {}.", ACCELERATION_NAMES[step]);
-                        } else {
-                            held_acceleration = Some(step);
-                        }
-                    }
-                }
-            }
-        }
         if console_click == Some(Click::Pause) {
             paused = !paused;
             held_controls.disarm(&keys_down);
             message = if paused { "Paused." } else { "Resumed." }.to_owned();
+        }
+        // The console's screen buttons replace the open map screen: F1, F2, F4
+        // (and F5-F12 off the galaxy page) close it and show their own screen,
+        // and the map buttons close whichever screen is over the flight view.
+        if active
+            && state.mode == ffe_rs::flight::Mode::Flight
+            && model_lab.is_none()
+            && model_viewer.is_none()
+        {
+            let map_open = nav.as_ref().is_some_and(|nav| nav.view != NavView::Closed);
+            let map_owned = nav
+                .as_ref()
+                .is_some_and(|nav| map_keys::owns_keys(nav.view, galaxy.is_some()));
+            let other_screen = pressed(Key::F1)
+                || pressed(Key::F2)
+                || pressed(Key::F4)
+                || console_click.is_some_and(|click| map_keys::click_leaves_map(click, map_owned));
+            if map_open && other_screen {
+                if let Some(nav) = nav.as_mut() {
+                    nav.view = NavView::Closed;
+                    if let (Some(map), Some(home)) = (galaxy.take(), nav.current_position()) {
+                        parked_galaxy = Some((home, map));
+                    }
+                }
+            }
+            // A map button over the services board or the status screen shows
+            // the map instead (the nav block below needs both closed).
+            let map_button = pressed(Key::F3)
+                || console_click == Some(Click::Navigation)
+                || console_click == Some(Click::Screen(3));
+            if map_button && (pad_board || status_page) {
+                pad_board = false;
+                status_page = false;
+            }
         }
         // F2 is the original's status screen: F1120's ship diagram and equipment
         // page on the console. The key and its console button both toggle it.
@@ -2453,8 +2808,15 @@ fn run() -> Result<(), String> {
         // F6..F12 while it is up. `status_left` keeps the F1 that closes it
         // from also cycling the view this frame.
         let mut status_left = false;
+        // The status screen is also reachable docked in a station (the executed
+        // original shows the Ship Equipment Status page for F2 in state 0x2a, as
+        // it does on a pad), except while a docking or launch sequence runs.
+        let status_mode = match state.mode {
+            ffe_rs::flight::Mode::Flight => true,
+            ffe_rs::flight::Mode::Docked => nav.as_ref().is_none_or(|nav| nav.sequence.is_none()),
+        };
         if active
-            && state.mode == ffe_rs::flight::Mode::Flight
+            && status_mode
             && model_lab.is_none()
             && model_viewer.is_none()
             && (pressed(Key::F2) || console_click == Some(Click::Screen(2)))
@@ -2485,6 +2847,11 @@ fn run() -> Result<(), String> {
             && model_viewer.is_none()
             && console_click == Some(Click::Screen(5))
             && !status_page
+            // F840 owns F5 (the map page's own icon) while the galaxy map or its
+            // system map is showing: it must not also swap the console's page.
+            && !nav
+                .as_ref()
+                .is_some_and(|nav| map_keys::owns_keys(nav.view, galaxy.is_some()))
         {
             // F1056's action 0xf5 swaps F1117's normal page and F1120's engines-off page.
             engines_page = !engines_page;
@@ -2495,12 +2862,7 @@ fn run() -> Result<(), String> {
             };
             held_controls.disarm(&keys_down);
         }
-        if active
-            && status_page
-            && state.mode == ffe_rs::flight::Mode::Flight
-            && model_lab.is_none()
-            && model_viewer.is_none()
-        {
+        if active && status_page && status_mode && model_lab.is_none() && model_viewer.is_none() {
             // F292: F6..F12 (and their console buttons) pick a page that has
             // something to show; F1 (or the views button) leaves the screen.
             let sections = status_sections(&cache, &state, nav.as_ref());
@@ -2638,6 +3000,8 @@ fn run() -> Result<(), String> {
         } else if active
             && model_lab.is_none()
             && model_viewer.is_none()
+            && !status_page
+            && !status_left
             && (pressed(Key::F1) || console_click == Some(Click::CycleView))
         {
             station_eye = true;
@@ -2675,6 +3039,7 @@ fn run() -> Result<(), String> {
                 ffe_rs::flight::Mode::Docked => {
                     // F343 re-displays the root from any station screen.
                     station_eye = false;
+                    status_page = false;
                     dock.open(StationScreen::Services);
                     message = station::SERVICES_HINT.to_owned();
                 }
@@ -2788,7 +3153,9 @@ fn run() -> Result<(), String> {
                 // The console's navigation-computer icon (`n`): the original's
                 // list of the system's stations and starports. The key is `n`
                 // (action 0x6e, ffe.asm 78415/78537).
-                if pressed(Key::N) || console_click == Some(Click::Navigation) {
+                if (pressed(Key::N) && !(nav.view == NavView::Galaxy && galaxy.is_some()))
+                    || console_click == Some(Click::Navigation)
+                {
                     toggle(nav, NavView::Places);
                     held_controls.disarm(&keys_down);
                 }
@@ -2813,15 +3180,220 @@ fn run() -> Result<(), String> {
                             };
                             // F834: a fresh map page with the map icon lit.
                             map_console = ffe_rs::console::MapConsole::default();
+                            map_page = None;
                         }
                     }
                 } else if let Some(map) = galaxy.take() {
+                    map_page = None;
                     if let Some(home) = nav.current_position() {
                         parked_galaxy = Some((home, map));
                     }
                 }
+                if galaxy.is_none() || nav.view != NavView::Galaxy {
+                    system_map = None;
+                    system_map_source = None;
+                }
+                // F840's F6 (this system, F966) and `n`/`r` (the selected star's
+                // system, F974) open the original's 3D system map.
+                if let (Some(map), true, true) = (galaxy.as_ref(), active, system_map.is_none()) {
+                    let home = pressed(Key::F6)
+                        || console_click.and_then(map_keys::click) == Some(MapAction::Select);
+                    let remote = (pressed(Key::N) || pressed(Key::R)) && map_page.is_none();
+                    if home || (remote && map.selected.is_some()) {
+                        let selected = map.selected.clone().filter(|_| !home);
+                        let built = match &selected {
+                            Some(star) if star.code != nav.current_system_code() => {
+                                ffe_rs::navigation::map_entry(
+                                    &cache,
+                                    star.code,
+                                    star.position,
+                                    star.kind,
+                                )
+                                .and_then(|entry| {
+                                    let created = ffe_rs::navigation::clock_words(nav.clock);
+                                    let bodies = ffe_rs::navigation::bodies_since(
+                                        &cache, &entry, created, created,
+                                    )?;
+                                    Ok((bodies, entry.name.clone(), false, Some((entry, created))))
+                                })
+                            }
+                            _ => Ok((nav.bodies.clone(), nav.system_name().to_owned(), true, None)),
+                        };
+                        match built {
+                            Ok((bodies, name, is_home, source)) => {
+                                system_map = Some(ffe_rs::system_map::SystemMap::new(
+                                    bodies, name, is_home, nav.clock,
+                                ));
+                                system_map_source = source;
+                                // The pages (description, economy, sky) are left.
+                                map_page = None;
+                                // F966/F974 light the 0x23 icon (the system map).
+                                if let Some(page) = map_keys::page(MapAction::Select) {
+                                    map_console = page;
+                                }
+                            }
+                            Err(error) => message = format!("System map error: {error}"),
+                        }
+                    }
+                }
+                // The page's own input (F982).
+                let mut close_system_map = false;
+                let mut reopened = false;
+                if let Some(sm) = system_map.as_mut() {
+                    let held = |key| inp.is_key_down(key);
+                    let slow = held(Key::LeftShift) || held(Key::RightShift);
+                    let point = inp
+                        .get_unscaled_mouse_pos(MouseMode::Pass)
+                        .and_then(|(x, y)| {
+                            display::logical_point(&prefs.display, x, y, inp.get_size())
+                        });
+                    let click_action = console_click.and_then(map_keys::click);
+                    // F5 and F7-F10 are the galaxy map's own pages: the page
+                    // closes and the galaxy map takes the key this frame.
+                    if [Key::F5, Key::F7, Key::F8, Key::F9, Key::F10]
+                        .into_iter()
+                        .any(|key| pressed(key))
+                        || matches!(
+                            click_action,
+                            Some(
+                                MapAction::Page
+                                    | MapAction::Details
+                                    | MapAction::Picture
+                                    | MapAction::Next
+                                    | MapAction::Previous
+                            )
+                        )
+                    {
+                        close_system_map = true;
+                    }
+                    let mut time_to = None;
+                    let mut zoom = 1.0f64;
+                    if pressed(Key::F11)
+                        || click_action == Some(MapAction::ZoomIn)
+                        || pressed(Key::NumPadPlus)
+                    {
+                        zoom = 1.25;
+                    }
+                    if pressed(Key::F12)
+                        || click_action == Some(MapAction::ZoomOut)
+                        || pressed(Key::NumPadMinus)
+                    {
+                        zoom = 1.0 / 1.25;
+                    }
+                    let smooth = (1.8f64 * elapsed).exp();
+                    if held(Key::PageUp) || held(Key::Equal) {
+                        zoom *= smooth;
+                    }
+                    if held(Key::PageDown) || held(Key::Minus) {
+                        zoom /= smooth;
+                    }
+                    if zoom != 1.0 {
+                        sm.zoom(zoom);
+                    }
+                    // F982's keys 3 and 4 step the time point (about 2.3 hours
+                    // of game time to a second held).
+                    let rate = if slow { 0.25 } else { 1.0 } * 0.0948 * 86_400.0 * elapsed;
+                    if held(Key::Right) {
+                        time_to = Some(sm.clock + rate);
+                    }
+                    if held(Key::Left) {
+                        time_to = Some(sm.clock - rate);
+                    }
+                    // F6 again, or Delete: back to now and to the star.
+                    if pressed(Key::F6)
+                        || click_action == Some(MapAction::Select)
+                        || pressed(Key::Delete)
+                    {
+                        if sm.clock != sm.now {
+                            time_to = Some(sm.now);
+                        }
+                        sm.reset_focus();
+                        reopened = true;
+                    }
+                    if pressed(Key::T) {
+                        sm.navcomp = !sm.navcomp;
+                        if sm.navcomp {
+                            pending_log.add(
+                                Source::Target,
+                                "Click on a target or destination for autopilot",
+                            );
+                        }
+                    }
+                    if pressed(Key::C) {
+                        if let Some(index) = sm.selected {
+                            sm.focus_on(index);
+                        }
+                    }
+                    if pressed(Key::Home) {
+                        sm.reset_focus();
+                    }
+                    // The slider (action 0x80) moves the time point; a click on
+                    // a body picks it (F983: the target, or with `t` the autopilot).
+                    if let Some((x, y)) = point.filter(|_| mouse_edge) {
+                        if ffe_rs::system_map::on_slider(x, y)
+                            && !matches!(
+                                console_click,
+                                Some(Click::Navigation | Click::Labels | Click::Hyperspace)
+                            )
+                        {
+                            time_to = Some(sm.clock + ffe_rs::system_map::slider_step(x, sm.home));
+                        } else if console_click.is_none() && y < ffe_rs::system_map::VIEW_HEIGHT {
+                            if let Some(index) = sm.pick(x, y) {
+                                let again = sm.selected == Some(index);
+                                sm.selected = Some(index);
+                                if sm.home {
+                                    nav.lock(index);
+                                    if sm.navcomp {
+                                        if nav.engage_body(index).is_some() {
+                                            message = format!(
+                                                "Autopilot engaged to {}.",
+                                                sm.bodies[index].name
+                                            );
+                                        }
+                                        sm.navcomp = false;
+                                    }
+                                }
+                                if again {
+                                    sm.focus_on(index);
+                                }
+                            }
+                        }
+                    }
+                    // Right-button drag turns the view (F982's mouse accumulators).
+                    if active && inp.get_mouse_down(MouseButton::Right) {
+                        if let (Some(before), Some(now)) = (system_map_drag, point) {
+                            sm.rotate(f64::from(now.0 - before.0), f64::from(now.1 - before.1));
+                        }
+                        system_map_drag = point;
+                    } else {
+                        system_map_drag = None;
+                    }
+                    if let Some(clock) = time_to.filter(|clock| *clock != sm.clock) {
+                        let bodies = match &system_map_source {
+                            Some((entry, created)) => ffe_rs::navigation::bodies_since(
+                                &cache,
+                                entry,
+                                *created,
+                                ffe_rs::navigation::clock_words(clock),
+                            ),
+                            None => nav.bodies_at(&cache, clock),
+                        };
+                        match bodies {
+                            Ok(bodies) => sm.set_time(bodies, clock),
+                            Err(error) => message = format!("System map error: {error}"),
+                        }
+                    }
+                    held_controls.disarm(&keys_down);
+                }
+                let _ = reopened;
+                if close_system_map {
+                    system_map = None;
+                    system_map_source = None;
+                    system_map_drag = None;
+                }
+                let sysmap_open = system_map.is_some();
                 let mut hyperspace = false;
-                if let Some(map) = galaxy.as_mut() {
+                if let Some(map) = galaxy.as_mut().filter(|_| !sysmap_open) {
                     let held = |key| inp.is_key_down(key);
                     let slow = held(Key::LeftShift) || held(Key::RightShift);
                     let rate = if slow { 0.25 } else { 1.0 };
@@ -2886,27 +3458,122 @@ fn run() -> Result<(), String> {
                     }
                     for action in actions {
                         match action {
+                            // In picture mode F11/F12 step its zoom (F845's `0xfb` and
+                            // `0xfc`) and redraw the sky; otherwise they zoom the map.
+                            MapAction::ZoomIn | MapAction::ZoomOut
+                                if map_page.as_ref().is_some_and(|p| p.background.is_some()) =>
+                            {
+                                let next = if action == MapAction::ZoomIn {
+                                    sky_zoom - 1
+                                } else {
+                                    sky_zoom + 1
+                                };
+                                if (1..=255).contains(&next) {
+                                    if let Some(viewer) = scene.as_ref() {
+                                        match ffe_rs::map_pages::picture(
+                                            &cache, viewer, map.centre, next,
+                                        ) {
+                                            Ok(page) => {
+                                                sky_zoom = next;
+                                                map_page = Some(page);
+                                            }
+                                            Err(error) => {
+                                                message = format!("Map page error: {error}");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             MapAction::ZoomIn => map.zoom_by(-zoom),
                             MapAction::ZoomOut => map.zoom_by(zoom),
                             MapAction::Page => {
                                 map_console = ffe_rs::console::MapConsole::default();
+                                map_page = None;
                                 message = "Map controls: F6 select, F7 details, F8 picture, \
                                            F9/F10 next/previous, F11/F12 zoom."
                                     .to_owned();
                             }
                             action => {
+                                // F6 returns from a page to the map; F7 is the
+                                // system description (F842), which needs a
+                                // selected star as F843's `0xf7` does.
+                                if action == MapAction::Select {
+                                    map_page = None;
+                                }
+                                // F7, F9 and F10 are F843's `0xf7`, `0xf9` and
+                                // `0xfa`: each needs a selected star, and F9/F10
+                                // draw nothing for a system with no information.
+                                let mut shown = false;
+                                // F8: the sky as seen from the map's centre (F844).
+                                if action == MapAction::Picture {
+                                    if let Some(viewer) = scene.as_ref() {
+                                        match ffe_rs::map_pages::picture(
+                                            &cache, viewer, map.centre, sky_zoom,
+                                        ) {
+                                            Ok(page) => {
+                                                map_page = Some(page);
+                                                shown = true;
+                                            }
+                                            Err(error) => {
+                                                message = format!("Map page error: {error}");
+                                                shown = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                if matches!(
+                                    action,
+                                    MapAction::Details | MapAction::Next | MapAction::Previous
+                                ) {
+                                    if let (Some(viewer), Some(selected)) =
+                                        (scene.as_ref(), map.selected.as_ref())
+                                    {
+                                        let built = match action {
+                                            MapAction::Details => ffe_rs::map_pages::description(
+                                                &cache,
+                                                viewer,
+                                                Some(selected),
+                                            )
+                                            .map(Some),
+                                            MapAction::Next => ffe_rs::map_pages::economy(
+                                                &cache,
+                                                viewer,
+                                                selected,
+                                                &|index| {
+                                                    nav.market_tables()?
+                                                        .name(index)
+                                                        .map(str::to_owned)
+                                                },
+                                            ),
+                                            _ => {
+                                                ffe_rs::map_pages::people(&cache, viewer, selected)
+                                            }
+                                        };
+                                        match built {
+                                            Ok(Some(page)) => {
+                                                map_page = Some(page);
+                                                shown = true;
+                                            }
+                                            Ok(None) => shown = true,
+                                            Err(error) => {
+                                                message = format!("Map page error: {error}");
+                                                shown = true;
+                                            }
+                                        }
+                                    }
+                                }
                                 if let Some(page) = map_keys::page(action) {
                                     map_console = page;
+                                }
+                                if shown {
+                                    continue;
                                 }
                                 message = match action {
                                     MapAction::Select => "Map controls selected.".to_owned(),
                                     MapAction::Picture => {
-                                        "The map picture mode (F844-F849) is not ported yet."
-                                            .to_owned()
+                                        "The map's sky needs the model data.".to_owned()
                                     }
-                                    _ => {
-                                        "The map details page (F842) is not ported yet.".to_owned()
-                                    }
+                                    _ => "No star is selected: centre the map on one.".to_owned(),
                                 };
                             }
                         }
@@ -2923,7 +3590,26 @@ fn run() -> Result<(), String> {
                         .and_then(|(x, y)| {
                             display::logical_point(&prefs.display, x, y, inp.get_size())
                         });
-                    if active && mouse_down {
+                    // F843's `0x80..0xbc`: a click on a body of the diagram (F851's
+                    // hot squares) shows that body's facts.
+                    if let (Some(page), Some(selected), Some(viewer), Some((x, y))) = (
+                        map_page.as_ref(),
+                        map.selected.as_ref(),
+                        scene.as_ref(),
+                        point,
+                    ) {
+                        if active && mouse_edge && console_click.is_none() {
+                            if let Some(index) = ffe_rs::map_pages::body_at(page, x, y) {
+                                match ffe_rs::map_pages::body_info(&cache, viewer, selected, index)
+                                {
+                                    Ok(Some(info)) => map_page = Some(info),
+                                    Ok(None) => {}
+                                    Err(error) => message = format!("Map page error: {error}"),
+                                }
+                            }
+                        }
+                    }
+                    if active && mouse_down && map_page.is_none() {
                         if let (Some(before), Some(now)) = (map_drag, point) {
                             map.rotate((now.0 - before.0) as i16, (now.1 - before.1) as i16);
                         }
@@ -3021,7 +3707,11 @@ fn run() -> Result<(), String> {
                             }
                         }
                     }
-                    if nav.view == NavView::Galaxy && enter && click_point.is_none() {
+                    if nav.view == NavView::Galaxy
+                        && enter
+                        && click_point.is_none()
+                        && system_map.is_none()
+                    {
                         hyperspace = true;
                     }
                     engage = enter && matches!(nav.view, NavView::System | NavView::Places);
@@ -4024,6 +4714,7 @@ fn run() -> Result<(), String> {
                 }
                 if (state.mode == ffe_rs::flight::Mode::Docked || pad_board)
                     && !station_eye
+                    && !status_page
                     && nav.as_ref().is_none_or(|nav| nav.sequence.is_none())
                     && model_lab.is_none()
                     && model_viewer.is_none()
@@ -4360,6 +5051,9 @@ fn run() -> Result<(), String> {
                                         Some(slot),
                                         &mut dock,
                                     );
+                                    // F389 prints the outcome through F352, the
+                                    // same console line as a prompt.
+                                    pending_log.add(Source::Station, message.clone());
                                 }
                             }
                         }
@@ -4723,6 +5417,9 @@ fn run() -> Result<(), String> {
                                     None,
                                     &mut dock,
                                 );
+                                // F387-F389: the outcome (or the refusal) is a console
+                                // line through F352, as a prompt is.
+                                pending_log.add(Source::Station, message.clone());
                             }
                         }
                         StationAction::Remove { row } => {
@@ -4737,6 +5434,9 @@ fn run() -> Result<(), String> {
                                     None,
                                     &mut dock,
                                 );
+                                // F387-F389: the outcome (or the refusal) is a console
+                                // line through F352, as a prompt is.
+                                pending_log.add(Source::Station, message.clone());
                             }
                         }
                         StationAction::BuyShip { row } => {
@@ -5150,6 +5850,7 @@ fn run() -> Result<(), String> {
                     allowed.then(|| state.request_docking())
                 } else if (pressed(Key::B) || pressed(Key::N))
                     && state.mode == ffe_rs::flight::Mode::Docked
+                    && !status_page
                 {
                     // At a station of a system the original's market; the prototype's
                     // one-item trade otherwise. Docked only: B is the brake in flight.
@@ -6188,6 +6889,8 @@ fn run() -> Result<(), String> {
                         .map_or(10_000, i64::from)
                 };
                 let events = nav.tick_ships(frame.seconds(), frame.tics, player, radius);
+                // F239: the police F238 asked for this frame.
+                nav.spawn_police(&cache);
                 // F714: canisters the ship's scoop takes into the hold.
                 if nav.sequence.is_none() && nav.docked.is_none() && !nav.landed_view() {
                     let hold = trade::hold_of(&state, trade::capacity(nav, &cache, &state));
@@ -6346,7 +7049,6 @@ fn run() -> Result<(), String> {
                                 let _ = &name;
                                 if acceleration != 0 {
                                     acceleration = 0;
-                                    held_acceleration = None;
                                     if let Some(model) = original.as_mut() {
                                         model.set_time_acceleration(0);
                                     }
@@ -6381,7 +7083,6 @@ fn run() -> Result<(), String> {
                             }
                             if acceleration != 0 {
                                 acceleration = 0;
-                                held_acceleration = None;
                                 if let Some(model) = original.as_mut() {
                                     model.set_time_acceleration(0);
                                 }
@@ -6514,7 +7215,7 @@ fn run() -> Result<(), String> {
                 .and_then(|scene| scene.ship_stats(state.ship))
                 .map(|stats| stats.mass),
         );
-        let status_shown = state.mode == ffe_rs::flight::Mode::Flight && status_page;
+        let status_shown = status_page;
         if status_shown {
             status_spin += elapsed;
         }
@@ -6568,13 +7269,17 @@ fn run() -> Result<(), String> {
             labels,
             navigation: nav.as_ref().is_some_and(|nav| nav.view == NavView::Places),
             status_page: engines_page,
-            status: (state.mode == ffe_rs::flight::Mode::Flight && status_page).then(|| {
+            status: status_page.then(|| {
                 (
                     status_section,
                     status_sections(&cache, &state, nav.as_ref()),
                 )
             }),
         };
+        // A status screen opened while docked does not outlast the launch.
+        if last_mode == ffe_rs::flight::Mode::Docked && state.mode == ffe_rs::flight::Mode::Flight {
+            status_page = false;
+        }
         // Launching from the station puts the ship out from it in this system, on the
         // original flight model (which the navigation moves).
         if last_mode == ffe_rs::flight::Mode::Docked
@@ -6663,6 +7368,11 @@ fn run() -> Result<(), String> {
                     .and_then(|index| nav.launch_seat(index))
                     .or_else(|| nav.station().map(|(_, at)| at))
             });
+            // The ship's co-rotation record is from the last frame the scan ran,
+            // which for a docked ship is the docking: left in place the first
+            // launch frame turns the ship by all the spin since. It is rebuilt
+            // from the first scan frame, as the ship is placed on the rows now.
+            station_turn = None;
             if let Some(at) = at {
                 model.teleport(at);
                 // The seat is the station's current place: the orbital drift
@@ -6684,6 +7394,9 @@ fn run() -> Result<(), String> {
                 });
                 if let (Some(_), Some(rows)) = (port, rows) {
                     model.align_to(rows);
+                    // The docking stages left the rows through F1520 (0.992 of unit
+                    // length); F1088 only zeroes the motion (PAR-10).
+                    model.docked_rows();
                 } else if let Some(port) = port {
                     model.face(port.point(port.front + 1.0e12));
                 } else if let Some(world) = nav.as_ref().and_then(|nav| nav.nearest_world(at)) {
@@ -6847,14 +7560,25 @@ fn run() -> Result<(), String> {
             state.combat.tick(frame_tics, 0);
             if let Some(stats) = player_stats {
                 let mode = original.as_ref().map_or(0, |model| model.player().mode);
-                let thrust = original.as_ref().map_or(0, |model| state.thrust_sum(model.thrust_words()));
-                if let Some(nav) = nav.as_ref() { state.rng = nav.random; }
+                let thrust = original
+                    .as_ref()
+                    .map_or(0, |model| state.thrust_sum(model.thrust_words()));
+                if let Some(nav) = nav.as_ref() {
+                    state.rng = nav.random;
+                }
                 let (failures, warning) = state.player_events(event_seconds, mode, &stats, thrust);
-                if let Some(nav) = nav.as_mut() { nav.random = state.rng; }
-                for event in failures { pending_log.add(Source::Combat, event.message()); }
-                if warning { pending_log.add(Source::Combat, "WARNING: Internal Fuel Tank Empty."); }
+                if let Some(nav) = nav.as_mut() {
+                    nav.random = state.rng;
+                }
+                for event in failures {
+                    pending_log.add(Source::Combat, event.message());
+                }
+                if warning {
+                    pending_log.add(Source::Combat, "WARNING: Internal Fuel Tank Empty.");
+                }
             }
         }
+        autopilot_events = event_seconds;
         if active && !death_control && !paused && state.mode == ffe_rs::flight::Mode::Flight {
             // F1014: the atmosphere heats the hull by speed below 20 km, in free
             // flight (F1021) and under the autopilot (F1019), as the flight step
@@ -6869,9 +7593,6 @@ fn run() -> Result<(), String> {
                 ) {
                     ffe_rs::damage::Heat::Rose { heat, warn } => {
                         state.hull_heat = heat;
-                    // The docking stages left the rows through F1520 (0.992 of unit
-                    // length); F1088 only zeroes the motion (PAR-10).
-                    model.docked_rows();
                         if warn {
                             pending_log.add(Source::Combat, ffe_rs::damage::HEAT_WARNING);
                         }
@@ -7116,7 +7837,6 @@ fn run() -> Result<(), String> {
                                     );
                                     let outcome = nav.damage_ship_at(id, damage, Some(hit.point));
                                     if let Some(attack) = outcome {
-        autopilot_events = event_seconds;
                                         state.credits = state.credits.saturating_add(attack.bounty);
                                         let mut text = match attack.damage {
                                             ffe_core::laser::Damage::Shields => format!(
@@ -7540,7 +8260,21 @@ fn run() -> Result<(), String> {
             });
         }
         screen.galaxy = None;
+        screen.system_map = None;
         screen.map_console = map_console;
+        if let (Some(sm), Some(nav)) = (system_map.as_ref(), nav.as_ref()) {
+            let range = sm
+                .selected
+                .and_then(|i| sm.bodies.get(i))
+                .filter(|_| sm.home)
+                .map(|body| {
+                    ffe_rs::navigation::range_label(ship_position(&original, &state), body.position)
+                });
+            screen.system_map = Some(ffe_rs::screen::SystemMapScene {
+                frame: sm.frame(&nav.date_at(sm.clock), range),
+                date: nav.date_text(),
+            });
+        }
         if let (Some(map), Some(tables), Some(viewer), Some(nav)) = (
             galaxy.as_mut(),
             sector_tables.as_ref(),
@@ -7558,6 +8292,7 @@ fn run() -> Result<(), String> {
                         sector: map.sector_text(),
                         fuel: map.fuel_text(report.as_ref()),
                         date: nav.date_text(),
+                        page: map_page.clone(),
                         info: map
                             .describe(viewer, system_details.as_ref())
                             .unwrap_or_default(),
@@ -7870,99 +8605,114 @@ fn run() -> Result<(), String> {
                         // then the port's own mission journal; a chosen
                         // journal shows its current issue.
                         let mut title = station::title(dock.screen, &station_name);
-                        let lines: Vec<(Option<u32>, String)> =
-                            if dock.screen == StationScreen::Journal {
-                                let library = state
-                                    .scripts
-                                    .as_ref()
-                                    .map(ffe_rs::scripts::journals)
-                                    .unwrap_or_default();
-                                match dock.journal {
-                                    Some(slot) => {
-                                        // F81 opening a journal: F71/F78's text
-                                        // of its issue, then F80/F79's page.
-                                        if journal_issue.as_ref().map(|(at, _)| *at) != Some(slot) {
-                                            let text = match (
-                                                script_assets.as_ref(),
-                                                script_messages.as_ref(),
-                                            ) {
-                                                (Some(assets), Some(messages)) => {
-                                                    let articles = ffe_rs::scripts::issue(
-                                                        &mut state,
-                                                        nav,
-                                                        &cache,
-                                                        station,
-                                                        assets,
-                                                        messages,
-                                                        &commander.name,
-                                                        slot,
-                                                    );
-                                                    ffe_rs::journal_page::issue_text(
-                                                        &articles,
-                                                        messages,
-                                                        &cache,
-                                                        |code| screen.glyph_advance(code),
-                                                    )
-                                                }
-                                                _ => Vec::new(),
-                                            };
-                                            journal_issue = Some((slot, text));
-                                        }
-                                        if let Some((_, name)) =
-                                            library.iter().find(|(at, _)| *at == slot)
-                                        {
-                                            title = name.clone();
-                                        }
-                                        let masthead = state
+                        let lines: Vec<(Option<u32>, String, Vec<(i32, String, u8)>)> = if dock
+                            .screen
+                            == StationScreen::Journal
+                        {
+                            let library = state
+                                .scripts
+                                .as_ref()
+                                .map(ffe_rs::scripts::journals)
+                                .unwrap_or_default();
+                            match dock.journal {
+                                Some(slot) => {
+                                    // F81 opening a journal: F71/F78's text
+                                    // of its issue, then F80/F79's page.
+                                    if journal_issue.as_ref().map(|(at, _)| *at) != Some(slot) {
+                                        let text = match (
+                                            script_assets.as_ref(),
+                                            script_messages.as_ref(),
+                                        ) {
+                                            (Some(assets), Some(messages)) => {
+                                                let articles = ffe_rs::scripts::issue(
+                                                    &mut state,
+                                                    nav,
+                                                    &cache,
+                                                    station,
+                                                    assets,
+                                                    messages,
+                                                    &commander.name,
+                                                    slot,
+                                                );
+                                                ffe_rs::journal_page::issue_text(
+                                                    &articles,
+                                                    messages,
+                                                    &cache,
+                                                    |code| screen.glyph_advance(code),
+                                                )
+                                            }
+                                            _ => Vec::new(),
+                                        };
+                                        journal_issue = Some((slot, text));
+                                    }
+                                    if let Some((_, name)) =
+                                        library.iter().find(|(at, _)| *at == slot)
+                                    {
+                                        title = name.clone();
+                                    }
+                                    let masthead = state
+                                        .scripts
+                                        .as_ref()
+                                        .and_then(|scripts| scripts.library.journals.get(slot))
+                                        .map_or(0, |journal| journal.masthead.max(0) as u32);
+                                    let more = script_messages
+                                        .as_ref()
+                                        .and_then(|messages| {
+                                            messages.text(ffe_rs::journal_page::MORE.0)
+                                        })
+                                        .unwrap_or_default();
+                                    screen.issue = Some(ffe_rs::screen::IssueView {
+                                        masthead,
+                                        text: journal_issue
+                                            .as_ref()
+                                            .map(|(_, text)| text.clone())
+                                            .unwrap_or_default(),
+                                        y: issue_scroll.y,
+                                        more,
+                                    });
+                                    Vec::new()
+                                }
+                                None => library
+                                    .iter()
+                                    .map(|(slot, name)| {
+                                        let status = state
                                             .scripts
                                             .as_ref()
-                                            .and_then(|scripts| scripts.library.journals.get(slot))
-                                            .map_or(0, |journal| journal.masthead.max(0) as u32);
-                                        let more = script_messages
-                                            .as_ref()
-                                            .and_then(|messages| {
-                                                messages.text(ffe_rs::journal_page::MORE.0)
+                                            .and_then(|scripts| scripts.library.journals.get(*slot))
+                                            .and_then(|journal| {
+                                                script_messages.as_ref().and_then(|messages| {
+                                                    ffe_rs::journal_page::subscription_status(
+                                                        journal,
+                                                        nav.day(),
+                                                        messages,
+                                                    )
+                                                })
                                             })
+                                            .map(|text| vec![(200, text, 0x0f)])
                                             .unwrap_or_default();
-                                        screen.issue = Some(ffe_rs::screen::IssueView {
-                                            masthead,
-                                            text: journal_issue
-                                                .as_ref()
-                                                .map(|(_, text)| text.clone())
-                                                .unwrap_or_default(),
-                                            y: issue_scroll.y,
-                                            more,
-                                        });
-                                        Vec::new()
-                                    }
-                                    None => {
-                                        library
-                                            .iter()
-                                            .map(|(_, name)| (None, name.clone()))
-                                            .chain(
-                                                state.missions.journal.iter().rev().map(|entry| {
-                                                    (Some(entry.day), entry.text.clone())
-                                                }),
-                                            )
-                                            .collect()
-                                    }
-                                }
-                            } else {
-                                state
-                                    .missions
-                                    .pages
-                                    .iter()
-                                    .rev()
-                                    .map(|page| (Some(page.day), page.text.clone()))
-                                    .collect()
-                            };
+                                        (None, name.clone(), status)
+                                    })
+                                    .chain(state.missions.journal.iter().rev().map(|entry| {
+                                        (Some(entry.day), entry.text.clone(), Vec::new())
+                                    }))
+                                    .collect(),
+                            }
+                        } else {
+                            state
+                                .missions
+                                .pages
+                                .iter()
+                                .rev()
+                                .map(|page| (Some(page.day), page.text.clone(), Vec::new()))
+                                .collect()
+                        };
                         let visible = station::layout(dock.screen).visible();
                         dock.selected = dock.selected.min(lines.len().saturating_sub(1));
                         dock.scroll = dock.scroll.min(lines.len().saturating_sub(visible));
                         let rows = lines
                             .iter()
                             .skip(dock.scroll)
-                            .map(|(day, text)| ffe_rs::station::DockRow {
+                            .map(|(day, text, columns)| ffe_rs::station::DockRow {
                                 main: match day {
                                     Some(day) => format!(
                                         "{}: {}",
@@ -7974,7 +8724,7 @@ fn run() -> Result<(), String> {
                                     None => text.clone(),
                                 },
                                 detail: None,
-                                columns: Vec::new(),
+                                columns: columns.clone(),
                                 fitted: false,
                             })
                             .collect();
@@ -8192,9 +8942,19 @@ fn run() -> Result<(), String> {
                     })
                     .collect();
                 contacts.extend(nav.ships.iter().filter(|ship| ship.visible()).map(|ship| {
+                    // F702 puts a pirate group on a far orbit round the root
+                    // frame, so F275's same-frame filter never shows it until it
+                    // has flown in. The port's stand-in orbit is 3 km to 30 km from
+                    // the pad; keep such a ship off the scanner (root frame) until
+                    // it is within F931's hit range (EXP-022).
+                    let unseen = ship.role == ffe_core::npc::Role::Pirate
+                        && (0..3)
+                            .map(|k| ((ship.position[k] - player_at[k]) as f64).powi(2))
+                            .sum::<f64>()
+                            > PIRATE_SCANNER_RANGE * PIRATE_SCANNER_RANGE;
                     ffe_rs::scanner::Contact {
                         position: ship.position,
-                        frame: nav.frame(),
+                        frame: if unseen { None } else { nav.frame() },
                         body: None,
                         starport: false,
                         mass: Some(ship.damage.mass),
@@ -8228,27 +8988,11 @@ fn run() -> Result<(), String> {
         // option (the original's DATA_008815..817 / DATA_009019).
         screen.sky = prefs::space_colour_rgb(prefs.space_colour);
         screen.stars_visible = prefs.others[1];
-        screen.dust_visible = prefs.others[0]
-            && nav.as_ref().is_none_or(|nav| {
-                const DUST_CLEARANCE_MM: f64 = 75_000_000.0;
-                if nav.landed_body().is_some()
-                    || nav.takeoff.is_some()
-                    || (0..DUST_CLEARANCE_MM as i32).contains(&nav.altitude)
-                {
-                    return false;
-                }
-                let eye = state
-                    .position
-                    .map(|v| v * ffe_rs::original_flight::UNITS_PER_FLIGHT_UNIT);
-                !nav.bodies.iter().any(|body| {
-                    matches!(body.kind, NavKind::Planet | NavKind::Moon)
-                        && body.radius > 0
-                        && (0..3)
-                            .map(|k| (eye[k] - body.position[k] as f64).powi(2))
-                            .sum::<f64>()
-                            <= (body.radius as f64 + DUST_CLEARANCE_MM).powi(2)
-                })
-            });
+        // F1035 already gates cloud creation at 20 km. Do not hide live clouds
+        // until a second altitude threshold: that reveals accumulated clouds
+        // together as the ship crosses it.
+        screen.dust_visible = prefs.others[0];
+        screen.shape_detail = ffe_rs::prefs::shape_detail_words(prefs.shape_detail);
         screen.lock_external = prefs.others[2];
         // The Graphic Detail page's "Level of Shape Detail" row is stored one
         // less than the original's `DATA_008812` (High, the default, is 1);
@@ -8478,16 +9222,6 @@ fn run() -> Result<(), String> {
                 }
             }),
             registration: parent_name,
-                    // F702 puts a pirate group on a far orbit round the root
-                    // frame, so F275's same-frame filter never shows it until it
-                    // has flown in. The port's stand-in orbit is 3 km to 30 km from
-                    // the pad; keep such a ship off the scanner (root frame) until
-                    // it is within F931's hit range (EXP-022).
-                    let unseen = ship.role == ffe_core::npc::Role::Pirate
-                        && (0..3)
-                            .map(|k| ((ship.position[k] - player_at[k]) as f64).powi(2))
-                            .sum::<f64>()
-                            > PIRATE_SCANNER_RANGE * PIRATE_SCANNER_RANGE;
             autopilot,
             turret: views.mode.is_turret().then(|| {
                 (
@@ -8576,14 +9310,13 @@ fn run() -> Result<(), String> {
             last_prompt = message.clone();
         }
         while let Some(event) = pending_log.take() {
-            // F349, the comms message (traffic control, clearance, fines,
-            // contracts), calls F217 first: time goes back to 1x unless the
-            // ship is in hyperspace (mode 4). A clearance on the approach
-            // therefore stops a 10000x run into the dock.
-            let comms = matches!(
-                event.source,
-                Source::Docking | Source::Launch | Source::Legal | Source::Mission
-            );
+            // F349, the game message writer (traffic control, clearance, fines,
+            // contracts, warnings, combat and market results), calls F217
+            // first: time goes back to 1x unless the ship is in hyperspace
+            // (mode 4). A clearance on the approach therefore stops a 10000x
+            // run into the dock, and a warning is shown for its five seconds
+            // instead of folding away in the next frame at 100x.
+            let comms = event.source.resets_time_acceleration();
             if log_channel.post(&mut screen.messages, event, &screen.clock) == Post::Added {
                 sound.play(Cue::Message);
                 if comms && in_transit.is_none() && acceleration != 0 {
@@ -9273,6 +10006,10 @@ fn apply_misjump(
 ///
 /// This replaces the earlier substitute that recovered the player at the
 /// nearest starport.
+/// F931's hit range (`0x7fffff` mm): a pirate group nearer than this is on the
+/// scanner, a farther one is still on F702's far orbit (EXP-022).
+const PIRATE_SCANNER_RANGE: f64 = 8_388_607.0;
+
 fn playership_destroyed(
     state: &mut Flight,
     original: &mut Option<OriginalFlight>,
@@ -9542,10 +10279,6 @@ fn buy_ship(
                 state.drive_fitted(nav.day());
             }
             state.hull = [0, 0];
-/// F931's hit range (`0x7fffff` mm): a pirate group nearer than this is on the
-/// scanner, a farther one is still on F702's far orbit (EXP-022).
-const PIRATE_SCANNER_RANGE: f64 = 8_388_607.0;
-
             state.shields = [0, 0];
             "Congratulations on your purchase. Call our upgrade department for the latest in additional equipment.".to_owned()
         }
@@ -9609,6 +10342,11 @@ fn station_repairs(state: &Flight, scene: Option<&ModelViewer>) -> Vec<station::
 }
 
 fn main() {
+    // `--help` and `--version` need no game files, window or cache.
+    if let Some(text) = ffe_rs::cli::early_answer(std::env::args_os().skip(1)) {
+        println!("{text}");
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("FFE-RS ERROR: {error}");
         // Started by double-click, the console closes on exit: keep the message
@@ -9652,7 +10390,10 @@ mod lifecycle_input_tests {
 
         assert!(held_controls.keys().is_empty());
         held_controls.update(&[Key::Up], &[Key::Up], true);
-        assert!(held_controls.keys().is_empty(), "a held key must stay blocked");
+        assert!(
+            held_controls.keys().is_empty(),
+            "a held key must stay blocked"
+        );
         held_controls.update(&[], &[], true);
         held_controls.update(&[Key::Up], &[Key::Up], true);
         assert_eq!(held_controls.keys(), &[Key::Up]);

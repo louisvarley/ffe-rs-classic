@@ -26,6 +26,7 @@ fn station() -> Body {
         temperature: 0,
         size_word: 0,
         parent_frame: None,
+        orbit_centre: None,
     }
 }
 

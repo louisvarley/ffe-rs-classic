@@ -171,22 +171,6 @@ pub fn rounded_panel(painter: &Painter, rect: Rect, radius: f32, fill: Color32, 
     painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
 }
 
-/// A vertical gradient through `stops` (`(fraction, colour)`) over `rect`.
-pub fn vertical_gradient(painter: &Painter, rect: Rect, stops: &[(f32, Color32)]) {
-    let mut mesh = Mesh::default();
-    for (index, (t, colour)) in stops.iter().enumerate() {
-        let y = rect.top() + rect.height() * t;
-        mesh.colored_vertex(pos2(rect.left(), y), *colour);
-        mesh.colored_vertex(pos2(rect.right(), y), *colour);
-        if index > 0 {
-            let base = (index as u32 - 1) * 2;
-            mesh.add_triangle(base, base + 1, base + 2);
-            mesh.add_triangle(base + 1, base + 3, base + 2);
-        }
-    }
-    painter.add(Shape::mesh(mesh));
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Icon {
@@ -200,6 +184,14 @@ pub enum Icon {
     Warning,
     Cube,
     Disc,
+    /// A 3.5in floppy disk: the floppy release.
+    Floppy,
+    /// A download tray: the shareware release.
+    Shareware,
+    /// A film strip: the game's videos.
+    Film,
+    /// Angle brackets: the source code link.
+    Code,
 }
 
 /// Draw `icon` (from the mockup's 24-unit SVG paths) into `rect`.
@@ -336,6 +328,55 @@ pub fn icon(painter: &Painter, icon: Icon, rect: Rect, colour: Color32) {
             ));
             painter.add(Shape::line(vec![p(12.0, 12.0), p(12.0, 22.0)], thin));
         }
+        Icon::Floppy => {
+            // The disk's outline with its cut corner, the metal shutter at the
+            // top and the label at the bottom.
+            painter.add(polyline(
+                &[
+                    (3.5, 3.5),
+                    (17.5, 3.5),
+                    (20.5, 6.5),
+                    (20.5, 20.5),
+                    (3.5, 20.5),
+                ],
+                true,
+            ));
+            painter.add(polyline(
+                &[(7.0, 3.5), (7.0, 9.0), (16.0, 9.0), (16.0, 3.5)],
+                false,
+            ));
+            painter.add(polyline(
+                &[(6.5, 20.5), (6.5, 14.0), (17.5, 14.0), (17.5, 20.5)],
+                false,
+            ));
+        }
+        Icon::Shareware => {
+            // An arrow into a tray.
+            painter.add(polyline(&[(12.0, 3.0), (12.0, 14.5)], false));
+            painter.add(polyline(&[(7.0, 9.8), (12.0, 14.8), (17.0, 9.8)], false));
+            painter.add(polyline(
+                &[(4.0, 15.5), (4.0, 20.5), (20.0, 20.5), (20.0, 15.5)],
+                false,
+            ));
+        }
+        Icon::Film => {
+            // A film strip: the frame, the two dividers and the sprocket holes.
+            painter.add(polyline(
+                &[(3.0, 4.5), (21.0, 4.5), (21.0, 19.5), (3.0, 19.5)],
+                true,
+            ));
+            painter.add(polyline(&[(7.5, 4.5), (7.5, 19.5)], false));
+            painter.add(polyline(&[(16.5, 4.5), (16.5, 19.5)], false));
+            for y in [8.0, 12.0, 16.0] {
+                painter.add(polyline(&[(3.0, y), (7.5, y)], false));
+                painter.add(polyline(&[(16.5, y), (21.0, y)], false));
+            }
+        }
+        Icon::Code => {
+            painter.add(polyline(&[(8.0, 6.5), (2.5, 12.0), (8.0, 17.5)], false));
+            painter.add(polyline(&[(16.0, 6.5), (21.5, 12.0), (16.0, 17.5)], false));
+            painter.add(polyline(&[(13.5, 4.5), (10.5, 19.5)], false));
+        }
         Icon::Disc => {
             // A compact disc: silver body, a sheen and the hub.
             let centre = p(12.0, 12.0);
@@ -364,8 +405,9 @@ pub fn icon(painter: &Painter, icon: Icon, rect: Rect, colour: Color32) {
 
 /// A chamfered shape filled with a vertical gradient: a fan of horizontal
 /// bands, each clipped to the chamfer.
-fn chamfer_gradient(painter: &Painter, rect: Rect, cut: f32, stops: &[(f32, Color32)]) {
-    let bands = 48;
+pub fn chamfer_gradient(painter: &Painter, rect: Rect, cut: f32, stops: &[(f32, Color32)]) {
+    // One band per two pixels keeps the rounded corners smooth.
+    let bands = ((rect.height() / 2.0).ceil() as usize).clamp(48, 600);
     let mut mesh = Mesh::default();
     let colour_at = |t: f32| -> Color32 {
         let mut previous = stops[0];

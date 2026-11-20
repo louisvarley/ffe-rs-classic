@@ -111,6 +111,9 @@ pub enum Action {
     Damage { object: i32, amount: u32 },
     /// F942 (statement 51): the object is destroyed.
     Explode { object: i32 },
+    /// F236 (statement 40) recorded an offence: the starport near the player's ship witnessed
+    /// it, and F238's police response acts on that starport (`DATA_009092`).
+    Offended,
     /// Statements 26 and 47: the object's name (`+0x124`) is message `code`
     /// with `word`.
     Name { object: i32, code: i32, word: i32 },
@@ -682,6 +685,7 @@ impl Host for Hooks<'_> {
                 let jurisdiction = usize::try_from(arg(0)).ok().filter(|slot| *slot < 6);
                 if let (Some(jurisdiction), Ok(offence)) = (jurisdiction, usize::try_from(arg(1))) {
                     if let Some(report) = self.legal.record(offence, Some(jurisdiction)) {
+                        self.actions.push(Action::Offended);
                         if !report.message.is_empty() {
                             self.posts.push(report.message);
                         }
@@ -1633,6 +1637,7 @@ pub fn apply(
                     nav.script_damage(id, amount);
                 }
             }
+            Action::Offended => nav.mark_offended(player),
             Action::Explode { object } => {
                 if let Ok(id) = u32::try_from(object - SHIP_IDS) {
                     nav.script_damage(id, u32::MAX);
@@ -2021,6 +2026,7 @@ pub struct Texts<'a> {
     pub messages: &'a ffe_core::message_strings::Messages<'a>,
     pub world: &'a ffe_core::bulletin::World<'a>,
     pub commander: &'a str,
+    pub player_ship_model_name: String,
 }
 
 /// The `[` macros over the game and the scripts (F76).
@@ -2108,6 +2114,46 @@ impl ffe_core::script::brackets::Macros for GameMacros<'_, '_, '_> {
     fn date(&mut self, day: u32) -> Vec<u8> {
         ffe_core::bulletin::date_day_text(day.saturating_sub(0x121cf7)).into_bytes()
     }
+
+    fn elite_rating(&mut self) -> Vec<u8> {
+        elite_rating_message(self.hooks.career.elite, self.texts.messages)
+    }
+
+    fn military_rank(&mut self, imperial: bool) -> Vec<u8> {
+        let points = if imperial {
+            self.hooks.career.imperial
+        } else {
+            self.hooks.career.federal
+        };
+        military_rank_message(points, imperial, self.texts.messages)
+    }
+
+    fn ship_model_name(&mut self) -> Vec<u8> {
+        self.texts.player_ship_model_name.as_bytes().to_vec()
+    }
+
+    fn current_system_name(&mut self) -> Vec<u8> {
+        self.texts.world.name.as_bytes().to_vec()
+    }
+
+    fn reset_random_word(&mut self, index: i32) {
+        self.scripts.library.reset_random_word(index);
+    }
+}
+
+fn elite_rating_message(score: u32, messages: &ffe_core::message_strings::Messages<'_>) -> Vec<u8> {
+    let code = 0x9c3e + ffe_core::status::elite_rating_index(score) as u16;
+    messages.text(code).unwrap_or_default().into_bytes()
+}
+
+fn military_rank_message(
+    points: u32,
+    imperial: bool,
+    messages: &ffe_core::message_strings::Messages<'_>,
+) -> Vec<u8> {
+    let index = ffe_core::status::military_rank_index(points).min(12) as u16;
+    let base = if imperial { 0x9c5a } else { 0x9c4d };
+    messages.text(base + index).unwrap_or_default().into_bytes()
 }
 
 /// F1344's draws: the shared pair and the script globals.
@@ -2324,6 +2370,7 @@ fn with_texts<R>(
     f: impl FnOnce(&mut Scripts, &mut Hooks<'_>, &Texts<'_>, u32) -> R,
 ) -> Option<R> {
     state.scripts.as_ref()?;
+    let player_ship_model_name = crate::ships::model_name(cache, state.ship).unwrap_or_default();
     let snapshot = Snapshot::take(state, nav, cache);
     let today = absolute_day(snapshot.clock);
     let mut random = std::mem::replace(&mut nav.random, Random::start());
@@ -2364,6 +2411,7 @@ fn with_texts<R>(
                     messages,
                     world,
                     commander,
+                    player_ship_model_name,
                 };
                 f(scripts, &mut hooks, &texts, today)
             })
@@ -2379,6 +2427,29 @@ fn with_texts<R>(
 mod tests {
     use super::*;
     use ffe_core::equipment::{self, Category, Loadout};
+
+    #[test]
+    fn rank_macros_use_the_imported_words_and_source_code_ranges() {
+        let mut strings = vec![Vec::new(); 0x80];
+        strings[0x3e] = b"Harmless".to_vec();
+        strings[0x47] = b"ELITE".to_vec();
+        strings[0x4d] = b"None".to_vec();
+        strings[0x59] = b"Admiral".to_vec();
+        strings[0x5a] = b"Outsider".to_vec();
+        strings[0x66] = b"Prince".to_vec();
+        let bytes = ffe_core::message_strings::encode(&[(14, strings)]).unwrap();
+        let messages = ffe_core::message_strings::Messages::new(&bytes).unwrap();
+
+        assert_eq!(elite_rating_message(0, &messages), b"Harmless");
+        assert_eq!(elite_rating_message(1_536_000, &messages), b"ELITE");
+        assert_eq!(military_rank_message(0, false, &messages), b"None");
+        assert_eq!(
+            military_rank_message(u32::MAX, false, &messages),
+            b"Admiral"
+        );
+        assert_eq!(military_rank_message(0, true, &messages), b"Outsider");
+        assert_eq!(military_rank_message(u32::MAX, true, &messages), b"Prince");
+    }
 
     struct Game {
         credits: u32,

@@ -14,7 +14,9 @@ use ffe_core::model_animation::{
     door_step, time_word, top_level_locals, START_TICS, TICS_PER_FRAME,
 };
 use ffe_core::model_commands::{material, VisibilityContext};
-use ffe_core::model_dot::{particle_clipped, point_dot, DotShape, DotTables};
+use ffe_core::model_dot::{
+    object_dot, particle_clipped, point_dot, DotShape, DotTables, ObjectDotTables, ObjectModel,
+};
 use ffe_core::model_execute::{
     execute_live, execute_scene, resolve_colour, ChildEnvironment, ChildModel, ChildModels,
     ChildOutcome, ChildRun, Execution, InstanceContext, Primitive,
@@ -123,6 +125,12 @@ pub struct AnimationInputs {
     /// nearest-depth full detail. Off by default; space dust turns it on, because its clouds
     /// drop dots with distance.
     pub depth_detail: bool,
+    /// F1751's detail words `DATA_008812` and `DATA_008813` (player block `+0x10`, `+0x14`),
+    /// added to the object's scale before the depth test: F228 writes them from the "Level
+    /// of Shape Detail" radio (Low -1/-2, Medium 0/0, High and Very High 1/1). The default
+    /// game runs High, which the executed original reads as `1, 1`; they only matter when
+    /// [`Self::depth_detail`] is set, and [`Self::original`] leaves them 0.
+    pub detail: [i32; 2],
 }
 
 impl AnimationInputs {
@@ -140,6 +148,7 @@ impl AnimationInputs {
             locals: top_level_locals(shades).0,
             jitter: JITTER_SEED,
             depth_detail: false,
+            detail: [0, 0],
         }
     }
 
@@ -153,6 +162,7 @@ impl AnimationInputs {
             locals: [i32::from(value); 64],
             jitter: JITTER_SEED,
             depth_detail: false,
+            detail: [0, 0],
         }
     }
 }
@@ -284,6 +294,8 @@ pub struct ModelViewer {
     ship_stats: Vec<Option<ShipStats>>,
     /// `DATA_004682`, split into its NUL-terminated entries (cache v11).
     model_strings: Vec<Vec<u8>>,
+    /// `DATA_007648`, F1398's character widths (cache v27).
+    char_widths: Option<[i8; 256]>,
     /// Font model slots 0..2's glyph programs (cache v14).
     glyphs: Vec<Option<GlyphSet>>,
     /// The object string F1747's `0x3016`/`0x3022` expand (the drawn object's
@@ -304,6 +316,8 @@ pub struct ModelViewer {
     stars: Option<StarTables>,
     /// The small-dot size tables (cache v25) and the ambient colour their halos mix with.
     dots: Option<DotTables>,
+    /// The sprites and per-model classes of far objects' dots (cache v35).
+    object_dots: Option<ObjectDotTables>,
     sky: [u8; 3],
     /// The background colour word registered with the runtime palette before a
     /// scene (F1330's first `F1326` call on `DATA_009217`). `Screen` sets it
@@ -461,6 +475,10 @@ impl ModelViewer {
             ));
         }
         let mut viewer = Self::from_models(models, table)?;
+        viewer.char_widths = cache
+            .asset("base:text/char-widths")
+            .filter(|widths| widths.len() == 256)
+            .map(|widths| std::array::from_fn(|index| widths[index] as i8));
         viewer.textures = TextureSet::from_cache(cache);
         viewer.stars = cache
             .asset("base:world/star-points")
@@ -468,6 +486,9 @@ impl ModelViewer {
         viewer.dots = cache
             .asset("base:world/dot-tables")
             .and_then(|bytes| DotTables::new(bytes).ok());
+        viewer.object_dots = cache
+            .asset("base:world/object-dots")
+            .and_then(|bytes| ObjectDotTables::new(bytes).ok());
         viewer.names = cache
             .asset("base:world/galaxy-tables")
             .zip(cache.asset("base:text/system-strings"))
@@ -658,6 +679,7 @@ impl ModelViewer {
             descriptors: Vec::new(),
             ship_stats: Vec::new(),
             model_strings: Vec::new(),
+            char_widths: None,
             glyphs: Vec::new(),
             registration: Vec::new(),
             commander: Vec::new(),
@@ -667,6 +689,7 @@ impl ModelViewer {
             jitter_next: Cell::new(JITTER_SEED),
             stars: None,
             dots: None,
+            object_dots: None,
             sky: [0; 3],
             background: Cell::new(0),
             names: None,
@@ -797,6 +820,72 @@ impl ModelViewer {
     /// The shades every instance copies (locals 12..17).
     pub fn shades(&self) -> [[u8; 3]; 8] {
         self.lighting.shades
+    }
+
+    /// F1680's descriptor fields for a model: the distance classes at which an object stops
+    /// being drawn (`far`) and becomes a dot (`dot`). `None` for a cache without them (before
+    /// v35) or a model with no descriptor, which the caller draws as before.
+    pub fn object_model(&self, index: u32) -> Option<ObjectModel> {
+        self.object_dots.as_ref()?.model(index)
+    }
+
+    /// F1700's dot for a far object (F1680's object flag): the sprites of a planet or moon
+    /// too small to draw as a model, or the particle of a star. `screen` is the projected
+    /// centre, `radius` and `depth` F1680's operands (`SpecialDiv(radius, depth)` is the size).
+    /// `Ok(None)` when nothing reaches the view; `Err` when the original's shaded sphere (not
+    /// ported) would be drawn, so the caller draws the model instead.
+    pub fn object_dot_frame(
+        &self,
+        model: ObjectModel,
+        screen: [i16; 2],
+        radius: i32,
+        depth: i32,
+    ) -> Result<Option<Frame>, String> {
+        let tables = self
+            .object_dots
+            .as_ref()
+            .ok_or("The cache has no object dot tables.")?;
+        let size = ffe_core::model_thruster::special_divide(radius, depth)?;
+        let shade = self.lighting.shades[0];
+        let Some(dot) = object_dot(
+            screen,
+            size,
+            radius,
+            depth,
+            model.colour,
+            model.unlit,
+            shade,
+            tables,
+            self.sky,
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut frame = Frame::default();
+        for (span, colour) in dot.spans(tables) {
+            frame.shapes.push(Shape::Spans(
+                vec![[span.x, span.y, span.width]],
+                self.rgb(colour),
+            ));
+            // A far object sorts behind everything the queue holds.
+            frame.keys.push(u32::MAX);
+        }
+        Ok(Some(frame))
+    }
+
+    /// The descriptor fields F1680's set-up reads for a model (scale, key scale, cull radius,
+    /// far and dot classes), for [`ffe_core::model_animation::setup_object`].
+    pub fn object_descriptor(&self, index: u32) -> Option<ffe_core::model_animation::Descriptor> {
+        let classes = self.object_model(index)?;
+        let model = self.find(index)?;
+        let [scale_offset, radius] = *self.descriptors.get(index as usize)?;
+        Some(ffe_core::model_animation::Descriptor {
+            scale: model.scale as i32,
+            scale_offset,
+            radius,
+            far: classes.far,
+            dot: classes.dot,
+        })
     }
 
     /// F1535: the lighting star's class byte (`+0x14c`) picks its shade
@@ -1361,7 +1450,11 @@ impl ModelViewer {
             } else {
                 0
             },
-            detail: [0, 0],
+            detail: if inputs.depth_detail {
+                inputs.detail
+            } else {
+                [0, 0]
+            },
             normals: &normals,
         };
         // With the v10 descriptor table, child models run inside their parent
@@ -2620,14 +2713,23 @@ impl ModelViewer {
 
     /// F1344 expansion for the families the models' text commands use: the model
     /// string table (`0x4000..0x8000`), the drawn object's own string
-    /// (`0x3016`, and `0x3022` unwrapped — F1398's width table is not imported),
+    /// (`0x3016`, and `0x3022` wrapped by F1398 at width 0x23),
     /// and FFE's game-over templates `0x9c00..0x9c03` (models 172/175).
     fn expanded_text(&self, code: u16, _model: u32) -> Result<Vec<u8>, String> {
         match code {
-            0x3016 | 0x3022 => {
+            0x3016 => {
                 // F1344 reads the object's +0x124 string, not the model's
                 // catalogue name. Intro objects have no supplied registration.
                 Ok(self.registration.clone())
+            }
+            0x3022 => {
+                let widths = self
+                    .char_widths
+                    .as_ref()
+                    .ok_or("F1392 needs cache v27 character widths.")?;
+                let mut registration = self.registration.clone();
+                crate::journal_page::wrap(&mut registration, 0x23, widths, |_| (0, 0));
+                Ok(registration)
             }
             0x4000..=0x7fff => self.model_string(code).map(<[u8]>::to_vec),
             // DATA_005129..005132, the tombstone's four strings. 0x0d is the
@@ -2761,12 +2863,27 @@ mod object_text_tests {
         let model = ViewerModel::new(0, 0, 0, &[], &[0, 0], &[], 0);
         let mut viewer = ModelViewer::from_models(vec![model], table).unwrap();
         viewer.set_model_strings(vec![b"LONG SHIP CATALOGUE NAME".to_vec()]);
-        for code in [0x3016, 0x3022] {
-            assert!(viewer.expanded_text(code, 0).unwrap().is_empty());
-        }
+        assert!(viewer.expanded_text(0x3016, 0).unwrap().is_empty());
+        assert!(viewer.expanded_text(0x3022, 0).is_err());
+        viewer.char_widths = Some([1; 256]);
         viewer.set_registration(b"AB-123");
-        for code in [0x3016, 0x3022] {
-            assert_eq!(viewer.expanded_text(code, 0).unwrap(), b"AB-123");
-        }
+        assert_eq!(viewer.expanded_text(0x3016, 0).unwrap(), b"AB-123");
+        assert_eq!(viewer.expanded_text(0x3022, 0).unwrap(), b"AB-123");
+    }
+
+    #[test]
+    fn f1392_wraps_the_registration_with_the_35_pixel_f1398_width() {
+        let table = SineTable::from_bytes(&vec![0; 16384 * 4]).unwrap();
+        let model = ViewerModel::new(0, 0, 0, &[], &[0, 0], &[], 0);
+        let mut viewer = ModelViewer::from_models(vec![model], table).unwrap();
+        viewer.char_widths = Some([1; 256]);
+        let registration = b"12345678901234567890 12345678901234567890";
+        viewer.set_registration(registration);
+
+        assert_eq!(viewer.expanded_text(0x3016, 0).unwrap(), registration);
+        assert_eq!(
+            viewer.expanded_text(0x3022, 0).unwrap(),
+            b"12345678901234567890\r12345678901234567890"
+        );
     }
 }

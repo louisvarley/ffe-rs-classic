@@ -39,6 +39,40 @@ pub struct Launcher {
     pub start: u8,
     pub skip_intro: bool,
     pub record: bool,
+    /// A folder of the CD videos chosen by the player; `None` uses the game
+    /// folder's own `DATA` folder when it has one.
+    pub videos: Option<PathBuf>,
+}
+
+/// Where the videos are and how many clips (AVI files) are there.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Videos {
+    /// The folder looked in (a chosen one even when it holds no videos).
+    pub folder: Option<PathBuf>,
+    pub count: usize,
+    /// The player chose the folder (rather than the game's own `DATA`).
+    pub custom: bool,
+}
+
+impl Videos {
+    pub fn found(&self) -> bool {
+        self.count > 0
+    }
+}
+
+/// The videos for `game`: the player's `custom` folder (or the `DATA` folder
+/// inside it) when set, else the game folder's own `DATA` folder.
+pub fn resolve_videos(game: &Path, custom: Option<&Path>) -> Videos {
+    let folder = match custom {
+        Some(path) => Some(ffe_rs::fmv::video_folder(path)),
+        None => ffe_rs::fmv::data_folder(game),
+    };
+    let count = folder.as_deref().map_or(0, ffe_rs::fmv::count_avi);
+    Videos {
+        folder,
+        count,
+        custom: custom.is_some(),
+    }
 }
 
 impl Launcher {
@@ -48,6 +82,7 @@ impl Launcher {
             start: 0,
             skip_intro: false,
             record: false,
+            videos: None,
         }
     }
 
@@ -57,6 +92,9 @@ impl Launcher {
         out.push_str(&format!("start={}\n", self.start));
         out.push_str(&format!("skip_intro={}\n", on_off(self.skip_intro)));
         out.push_str(&format!("record={}\n", on_off(self.record)));
+        if let Some(videos) = &self.videos {
+            out.push_str(&format!("videos={}\n", videos.display()));
+        }
         out
     }
 
@@ -82,6 +120,9 @@ impl Launcher {
                 }
                 "skip_intro" => self.skip_intro = value == "on",
                 "record" => self.record = value == "on",
+                "videos" => {
+                    self.videos = (!value.is_empty()).then(|| PathBuf::from(value));
+                }
                 _ => {}
             }
         }
@@ -191,6 +232,7 @@ mod tests {
         launcher.start = 1;
         launcher.skip_intro = true;
         launcher.record = false;
+        launcher.videos = Some(PathBuf::from("/discs/elite3/DATA"));
         let mut read = Launcher::defaults(root);
         read.read(&launcher.to_text());
         assert_eq!(read, launcher);
@@ -207,6 +249,32 @@ mod tests {
         let mut read = Launcher::defaults(Path::new("/games/ffe"));
         read.read("start=4\n");
         assert_eq!(read.start, 0, "types 4 and 5 repeat the default arm");
+    }
+
+    #[test]
+    fn videos_come_from_the_games_data_folder_unless_one_is_chosen() {
+        let game = tempfile::tempdir().unwrap();
+        let none = resolve_videos(game.path(), None);
+        assert!(!none.found() && none.folder.is_none() && !none.custom);
+        let data = game.path().join("DATA");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("BB1.AVI"), b"x").unwrap();
+        std::fs::write(data.join("BB1.BMP"), b"x").unwrap();
+        let auto = resolve_videos(game.path(), None);
+        assert_eq!((auto.count, auto.custom), (1, false));
+        assert_eq!(auto.folder, Some(data));
+        // A chosen disc root resolves to its DATA folder and wins.
+        let disc = tempfile::tempdir().unwrap();
+        std::fs::create_dir(disc.path().join("DATA")).unwrap();
+        std::fs::write(disc.path().join("DATA").join("G1.AVI"), b"x").unwrap();
+        std::fs::write(disc.path().join("DATA").join("G2.AVI"), b"x").unwrap();
+        let chosen = resolve_videos(game.path(), Some(disc.path()));
+        assert_eq!((chosen.count, chosen.custom), (2, true));
+        // A chosen folder with no videos is kept, and not found.
+        let empty = tempfile::tempdir().unwrap();
+        let missing = resolve_videos(game.path(), Some(empty.path()));
+        assert!(!missing.found() && missing.custom);
+        assert_eq!(missing.folder, Some(empty.path().to_path_buf()));
     }
 
     #[test]
@@ -299,40 +367,49 @@ mod discovery_tests {
     }
 }
 
-/// Invalidate the root asset pack before switching source installations.
+/// Invalidate generated packs before switching source installations.
 /// A failed removal leaves the caller on the previous source directory.
 pub fn invalidate_assets(root: &Path, previous: &Path, next: &Path) -> Result<(), String> {
     let identity = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if identity(previous) == identity(next) {
         return Ok(());
     }
-    let assets = root.join("assets.bin");
-    match std::fs::remove_file(&assets) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "Could not remove {}: {error}. Game folder was not changed.",
-            assets.display()
-        )),
+    for name in ["music.bin", "assets.bin"] {
+        let path = root.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Could not remove {}: {error}. Game folder was not changed.",
+                    path.display()
+                ));
+            }
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod asset_invalidation_tests {
     use super::*;
     #[test]
-    fn switching_folders_removes_assets_but_rechecking_keeps_them() {
+    fn switching_folders_removes_generated_packs_but_rechecking_keeps_them() {
         let root = tempfile::tempdir().unwrap();
         let previous = root.path().join("previous");
         let next = root.path().join("next");
         std::fs::create_dir(&previous).unwrap();
         std::fs::create_dir(&next).unwrap();
         let assets = root.path().join("assets.bin");
+        let music = root.path().join("music.bin");
         std::fs::write(&assets, b"old pack").unwrap();
+        std::fs::write(&music, b"old music").unwrap();
         invalidate_assets(root.path(), &previous, &previous.join(".")).unwrap();
         assert!(assets.is_file());
+        assert!(music.is_file());
         invalidate_assets(root.path(), &previous, &next).unwrap();
         assert!(!assets.exists());
+        assert!(!music.exists());
         invalidate_assets(root.path(), &previous, &next).unwrap();
     }
     #[test]

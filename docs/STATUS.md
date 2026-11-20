@@ -28,7 +28,7 @@ and reference replays and Classic uses original frame comparisons.
 ## Work list to finish the game — 2026-11-04 (handoff)
 
 This is the order to work the burndown's items in, by burndown id; the live
-counts are in [BURNDOWN.md](BURNDOWN.md) (77 of 224 open on 15 November). Every item is ported from
+counts are in [BURNDOWN.md](BURNDOWN.md) (35 of 230 open on 19 November; parity-01, -04, -05, -07, -09, -10, -11, -12, -13, -14, -17 and -18 are closed as accepted at about 90 to 95%, and parity-15 at about 80%, see [ACCEPTED_PARITY.md](ACCEPTED_PARITY.md)). Every item is ported from
 `jjffe-master/ffe.asm` and checked against the executed original where a
 reference tool can do so; nothing is guessed. Each change updates the burndown
 in the same commit and records any approved difference in `docs/DEVIATIONS.md`.
@@ -73,9 +73,9 @@ depends on them.
   `parity-12` one set of event clocks, time acceleration and physical
   integration; `parity-13` hyperjump start, transit, misjump and arrival;
   `parity-14` fuel-scooping gates and capacity; `parity-15` the NPC speed caps
-  and simplified flight states (script attackers already fly with the
-  original's guidance; traffic and pirates do not), now also F702's system-wide
-  placement and F238's police response (`parity-16`, F688's spawn, is done);
+  and simplified flight states (closed 2026-11-19 as accepted at about 80%: pirates
+  and the police response follow the original; F702's system-wide placement and
+  the other gaps are in ACCEPTED_PARITY.md; `parity-16`, F688's spawn, is done);
   `parity-17` the original's RNG state and call order everywhere (the new game
   matches the executed original up to the end of F688); `parity-18` saving and restoring the
   complete live state; `parity-20` market, shipyard, bulletin-board and daily
@@ -85,6 +85,9 @@ depends on them.
   after death and on every resume path.
 
 ### 2. Flight core
+
+Closed 2026-11-18 as accepted at about 90% (see [ACCEPTED_PARITY.md](ACCEPTED_PARITY.md)): `flight-4`, `-6`, `-9`, `-10`,
+`-11`, `-12`, `-13` and `-14`. Still open here: `flight-1`, `flight-5` and `flight-8`.
 
 `flight-1` the object system and agent records (`cstruct`/`gmstruct`; not
 started, much depends on it); `flight-4` the fixed 50 Hz step, independent of
@@ -119,10 +122,9 @@ and near-surface radius and frame transitions.
   police, pirates and encounters; `gameplay-9` bulletin board and missions;
   `gameplay-10` journal and mission state; `gameplay-11` shuttles and station
   traffic; `gameplay-12` communications and messages; `gameplay-13` and
-  `gameplay-25` death, the escape capsule and GAME OVER; `gameplay-26` the
-  default Saker start, F2 loadout and start records; `gameplay-38` the module
+  `gameplay-25` death, the escape capsule and GAME OVER; `gameplay-38` the module
   clock and event routing; `gameplay-39` the autopilot at run time;
-  `gameplay-40` the starport pad descent; `gameplay-dust` space-dust spawning,
+  `gameplay-dust` space-dust spawning,
   lifetime and flight drawing.
 - Not started: `gameplay-8` a combat scenario replayed against the reference.
 
@@ -145,10 +147,11 @@ saves replayed against the reference.
 
 ### 6. Content import
 
-`content-1` the remaining gameplay tables (ships, equipment, economy);
-`content-2` the remaining message strings, journal and fonts; `content-4` an
-inventory of the optional CD media; `content-5` the import checked on CD 1.01 as
-well as floppy 1.02.
+The ship, equipment and economy tables in `content-1` are imported and
+verified (2026-11-16). `content-2` the remaining message strings, journal and
+fonts; `content-4` an inventory of the optional CD media; `content-5` the
+import checked on CD 1.01 as well as floppy 1.02. Mission-cargo behavior stays
+under its existing gameplay items.
 
 ### 7. Original drawing (Classic)
 

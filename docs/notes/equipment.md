@@ -129,9 +129,9 @@ third-column fitted predicates F397/F402/F407/F412/F417/F422/F427, ported by
   Vaccine row can remove an MB4 machine, and its removal price (0) is what F388
   refunds.
 - The port keeps `Loadout.mining: [u8; 10]` (equipment codes) and derives the
-  count. The 52-byte machine state (object, hopper, deployment) and the F243/
-  F244 deployment UI are **not ported**; fitting/removing/refunding and the
-  hold mass are. There is no market/hold difference between the two records
+  count. Fitting, removing, refunding and the hold mass follow the source, and the
+  machines' deployment (F242-F252) is ported in `docs/notes/mining.md` (not
+  compared with the original). There is no market/hold difference between the two records
   beyond their 30 t / 20 t masses.
 
 ### Cabins (category 1, F399/F401)
@@ -140,8 +140,8 @@ third-column fitted predicates F397/F402/F407/F412/F417/F422/F427, ported by
   `DATA_008892` is the occupied count. F401 refuses with 0x98fc ("You cannot
   remove an occupied cabin.") when every cabin is occupied; an unoccupied
   cabin can always be removed. The port stores `cabins` and `occupied_cabins`
-  and exposes `cabin_capacity`/`free_cabins`; passenger missions that would
-  raise the occupied count are not ported, so it stays 0.
+  and exposes `cabin_capacity`/`free_cabins`; passenger contracts raise the
+  occupied count through F534's cabin check (`docs/notes/missions.md`).
 - Each cabin is 5 t (record 25) and fits without a numerical cap in the source;
   `Loadout::validate` keeps the port's conservative 100.
 

@@ -522,7 +522,7 @@ struct Voice {
     loops_remaining: u8,
 }
 
-/// A stream at the mixing rate: the CD videos' 22,050 Hz mono soundtrack.
+/// A stream at the mixing rate: 22,050 Hz mono PCM.
 #[derive(Debug)]
 struct Stream {
     pcm: Arc<Vec<i16>>,
@@ -530,12 +530,13 @@ struct Stream {
     gain: f64,
 }
 
-/// The 16-voice software mixer, plus one stream voice for a video's sound.
+/// The 16-voice software mixer, plus independent music and video stream voices.
 #[derive(Debug)]
 pub struct Mixer {
     effects: Arc<EffectLibrary>,
     voices: [Option<Voice>; VOICE_COUNT],
-    stream: Option<Stream>,
+    video_stream: Option<Stream>,
+    music_stream: Option<Stream>,
 }
 
 impl Mixer {
@@ -543,7 +544,8 @@ impl Mixer {
         Self {
             effects: Arc::new(effects),
             voices: std::array::from_fn(|_| None),
-            stream: None,
+            video_stream: None,
+            music_stream: None,
         }
     }
 
@@ -551,7 +553,7 @@ impl Mixer {
     /// `volume` (as [`Mixer::play`]), replacing any stream already playing.
     pub fn play_stream(&mut self, pcm: Arc<Vec<i16>>, volume: u8) {
         let gain = level_gain(volume);
-        self.stream = (gain > 0.0 && !pcm.is_empty()).then_some(Stream {
+        self.video_stream = (gain > 0.0 && !pcm.is_empty()).then_some(Stream {
             pcm,
             position: 0,
             gain,
@@ -559,12 +561,36 @@ impl Mixer {
     }
 
     pub fn stop_stream(&mut self) {
-        self.stream = None;
+        self.video_stream = None;
     }
 
     /// Whether a stream is still playing.
     pub fn stream_active(&self) -> bool {
-        self.stream.is_some()
+        self.video_stream.is_some()
+    }
+
+    /// Play generated music PCM independently of a video soundtrack.
+    pub fn play_music_stream(&mut self, pcm: Arc<Vec<i16>>, volume: u8) {
+        let gain = level_gain(volume);
+        self.music_stream = (gain > 0.0 && !pcm.is_empty()).then_some(Stream {
+            pcm,
+            position: 0,
+            gain,
+        });
+    }
+
+    pub fn stop_music_stream(&mut self) {
+        self.music_stream = None;
+    }
+
+    pub fn set_music_stream_volume(&mut self, volume: u8) {
+        if let Some(stream) = self.music_stream.as_mut() {
+            stream.gain = level_gain(volume);
+        }
+    }
+
+    pub fn music_stream_active(&self) -> bool {
+        self.music_stream.is_some()
     }
 
     pub fn set_effects(&mut self, effects: Arc<EffectLibrary>) {
@@ -645,7 +671,7 @@ impl Mixer {
 
     pub fn stop_all(&mut self) {
         self.voices = std::array::from_fn(|_| None);
-        self.stream = None;
+        self.video_stream = None;
     }
 
     pub fn active_voices(&self) -> usize {
@@ -698,11 +724,18 @@ impl Mixer {
                     voice.loops_remaining -= 1;
                 }
             }
-            if let Some(stream) = self.stream.as_mut() {
+            if let Some(stream) = self.video_stream.as_mut() {
                 sum += f64::from(stream.pcm[stream.position]) * stream.gain;
                 stream.position += 1;
                 if stream.position >= stream.pcm.len() {
-                    self.stream = None;
+                    self.video_stream = None;
+                }
+            }
+            if let Some(stream) = self.music_stream.as_mut() {
+                sum += f64::from(stream.pcm[stream.position]) * stream.gain;
+                stream.position += 1;
+                if stream.position >= stream.pcm.len() {
+                    self.music_stream = None;
                 }
             }
             *slot = sum.clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
@@ -800,6 +833,23 @@ mod tests {
         assert_eq!(mixer.render(1)[0], (7.0 * gain) as i16);
         mixer.stop_stream();
         assert_eq!(mixer.render(1)[0], 0);
+    }
+
+    #[test]
+    fn music_and_video_streams_mix_independently() {
+        let mut mixer = Mixer::new(EffectLibrary::new());
+        mixer.play_stream(Arc::new(vec![300; 4]), 63);
+        mixer.play_music_stream(Arc::new(vec![500; 4]), 63);
+        assert!(mixer.render(1)[0] > 700);
+
+        mixer.stop_stream();
+        assert!(mixer.music_stream_active());
+        assert!(mixer.render(1)[0] > 400);
+
+        mixer.stop_all();
+        assert!(mixer.music_stream_active());
+        mixer.stop_music_stream();
+        assert!(!mixer.music_stream_active());
     }
 
     #[test]

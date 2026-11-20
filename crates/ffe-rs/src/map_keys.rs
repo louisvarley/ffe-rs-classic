@@ -91,6 +91,27 @@ pub fn click(click: crate::console::Click) -> Option<MapAction> {
     })
 }
 
+/// Whether a console click on another screen's button replaces the open map
+/// screen. In the original a screen button (F1 views, F2 status, F4 services and,
+/// when the map page does not own them, the F5-F12 buttons) closes the map and
+/// shows its own screen. While the F834/F840 galaxy page is up (`map_owned`) the
+/// F5-F12 buttons are the map's own controls and leave it open.
+pub fn click_leaves_map(click: crate::console::Click, map_owned: bool) -> bool {
+    use crate::console::Click;
+    match click {
+        Click::CycleView | Click::Screen(2) | Click::Screen(4) => true,
+        Click::Screen(5)
+        | Click::Front
+        | Click::Rear
+        | Click::Turret
+        | Click::External
+        | Click::Missile
+        | Click::Combat
+        | Click::Capsule => !map_owned,
+        _ => false,
+    }
+}
+
 /// The console page a function key selects (`None` for the scene-only zoom
 /// keys). F5 returns to the controls page, which is the state `F834` leaves.
 pub fn page(action: MapAction) -> Option<MapConsole> {
@@ -190,6 +211,29 @@ mod tests {
             Click::Acceleration(0),
         ] {
             assert_eq!(click(c), None, "{c:?} is not a map action");
+        }
+    }
+
+    #[test]
+    fn other_screen_buttons_replace_the_open_map() {
+        use crate::console::Click;
+        for owned in [true, false] {
+            for c in [Click::CycleView, Click::Screen(2), Click::Screen(4)] {
+                assert!(click_leaves_map(c, owned), "{c:?} closes the map");
+            }
+            for c in [
+                Click::Screen(3),
+                Click::Navigation,
+                Click::Hyperspace,
+                Click::Pause,
+            ] {
+                assert!(!click_leaves_map(c, owned), "{c:?} is not a screen switch");
+            }
+        }
+        // F5-F12 are the galaxy page's own controls while it owns them.
+        for c in [Click::Screen(5), Click::Front, Click::Capsule] {
+            assert!(!click_leaves_map(c, true));
+            assert!(click_leaves_map(c, false));
         }
     }
 

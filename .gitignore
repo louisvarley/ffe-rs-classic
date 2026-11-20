@@ -43,6 +43,9 @@ legacy/ffed3d-master/
 !/assets/Materials/port-pavers-*.png
 /assets.bin
 /assets.bin.tmp
+/music.bin
+/.music-bin-*.tmp
+/.music-render-*/
 /assets-old/
 /found_assets/
 /assets-old/
@@ -131,3 +134,6 @@ tools/redraw-swarmui.ps1
 
 # A local copy of the Elite Club shareware distribution (original game files); never commit.
 /firstenc.zip
+
+# Playtest packages staged by tools/package.ps1.
+/dist/

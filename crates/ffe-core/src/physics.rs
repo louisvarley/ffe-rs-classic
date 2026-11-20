@@ -50,7 +50,7 @@ pub struct Motion {
 
 /// The scanner state F585 touches: the player's craft number (`DATA_008857`)
 /// and the scanner rotation word (`DATA_008933`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Scanner {
     pub player: u32,
     pub rotation: u16,

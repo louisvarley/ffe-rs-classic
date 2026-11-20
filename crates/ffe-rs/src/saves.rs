@@ -448,10 +448,30 @@ pub fn numbered_saves(directory: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(paths)
 }
 
+/// Delete only a quick or numbered save discovered in this save directory.
+pub fn delete_save(directory: &Path, path: &Path) -> Result<(), String> {
+    let allowed = all_saves(directory)?
+        .iter()
+        .any(|candidate| candidate == path);
+    if !allowed {
+        return Err(format!("{}: not a commander save", path.display()));
+    }
+    fs::remove_file(path)
+        .map_err(|error| format!("{}: cannot delete save: {error}", path.display()))
+}
+
 /// Write a new numbered save without overwriting any existing one. The bytes go
 /// to a sibling temporary file and are linked into place, so an interrupted
 /// writer cannot leave a partial numbered save.
 pub fn save_numbered(directory: &Path, save: &SaveGame) -> Result<PathBuf, String> {
+    let next = next_numbered(directory)?;
+    let path = directory.join(format!("{NUMBERED_PREFIX}{next:08}.json"));
+    write_new_atomic(&path, &encode_game(save)?)?;
+    Ok(path)
+}
+
+/// The number the next `commander-NNNNNNNN.json` save would take.
+fn next_numbered(directory: &Path) -> Result<u32, String> {
     let existing = numbered_saves(directory)?;
     let next = match existing.last() {
         Some(path) => {
@@ -468,9 +488,99 @@ pub fn save_numbered(directory: &Path, save: &SaveGame) -> Result<PathBuf, Strin
     if next > 99_999_999 {
         return Err("Numbered save limit reached.".to_owned());
     }
-    let path = directory.join(format!("{NUMBERED_PREFIX}{next:08}.json"));
+    Ok(next)
+}
+
+/// The longest save name the save menu's text box takes (without `.json`).
+pub const MAX_SAVE_NAME: usize = 24;
+/// The fixed ending of every save file; the save menu shows it after the box's
+/// text and it cannot be edited.
+pub const SAVE_EXTENSION: &str = ".json";
+
+/// The name the save menu offers: the next free `commander-NNNNNNNN`.
+pub fn default_save_name(directory: &Path) -> String {
+    let next = next_numbered(directory).unwrap_or(1);
+    format!("{NUMBERED_PREFIX}{next:08}")
+}
+
+/// Why `name` (typed without `.json`) cannot be a save name, or `None` when it
+/// can. A name is 1 to [`MAX_SAVE_NAME`] letters, digits, spaces, `-` or `_`,
+/// with no space at either end, and is not the quick save's or a Windows
+/// device name, so it can only ever name a plain file in the save directory.
+pub fn save_name_error(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("Type a name for the save.");
+    }
+    if name.chars().count() > MAX_SAVE_NAME {
+        return Some("That name is too long.");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+    {
+        return Some("Use letters, digits, spaces, - and _ only.");
+    }
+    if name.starts_with(' ') || name.ends_with(' ') {
+        return Some("A name cannot start or end with a space.");
+    }
+    let upper = name.to_ascii_uppercase();
+    let device = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.len() == 4
+            && upper.as_bytes()[3].is_ascii_digit());
+    if device || upper == "QUICK" {
+        return Some("That name is reserved.");
+    }
+    None
+}
+
+/// The path a save named `name` (without `.json`) would have.
+pub fn named_path(directory: &Path, name: &str) -> Result<PathBuf, String> {
+    if let Some(reason) = save_name_error(name) {
+        return Err(reason.to_owned());
+    }
+    Ok(directory.join(format!("{name}{SAVE_EXTENSION}")))
+}
+
+/// Write a new save called `name` (without `.json`). An existing save of that
+/// name is never replaced.
+pub fn save_named(directory: &Path, name: &str, save: &SaveGame) -> Result<PathBuf, String> {
+    let path = named_path(directory, name)?;
+    if path.exists() {
+        return Err(format!("A save named {name} already exists."));
+    }
     write_new_atomic(&path, &encode_game(save)?)?;
     Ok(path)
+}
+
+/// Every save the load and delete lists offer: the quick save first, then the
+/// rest (numbered or named) newest first.
+pub fn all_saves(directory: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries =
+        fs::read_dir(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+        let name = entry.file_name();
+        let Some(stem) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(SAVE_EXTENSION))
+        else {
+            continue;
+        };
+        if stem.eq_ignore_ascii_case("quick") || save_name_error(stem).is_some() {
+            continue;
+        }
+        let modified = entry.metadata().and_then(|meta| meta.modified()).ok();
+        found.push((modified, entry.path()));
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut paths: Vec<PathBuf> = found.into_iter().map(|(_, path)| path).collect();
+    let quick = quick_path(directory);
+    if quick.is_file() {
+        paths.insert(0, quick);
+    }
+    Ok(paths)
 }
 
 /// Write a file that must not already exist, via a synced temporary file and a
@@ -611,12 +721,14 @@ mod tests {
             legal: ffe_core::npc::Legal {
                 wanted: true,
                 alert: true,
+                chase: 1,
                 illegal_fire: true,
                 offences: 3,
                 fines: [0, 6000, 0, 0, 0, 0],
                 records: [0; 6],
                 points: [0; 6],
             },
+            offended: None,
             ship_lock: Some(7),
             missile_lock: Some(9),
             missile_view: Some(11),
@@ -847,6 +959,84 @@ mod tests {
         let (path, loaded) = load_quick_or_latest(directory.path()).unwrap();
         assert!(path.ends_with("commander-00000002.json"));
         assert_eq!(loaded, save);
+    }
+
+    #[test]
+    fn save_names_are_plain_file_stems() {
+        for good in ["commander-00000001", "Jameson", "my save 2", "a_b-c", "x"] {
+            assert_eq!(save_name_error(good), None, "{good}");
+        }
+        let too_long = "x".repeat(MAX_SAVE_NAME + 1);
+        for bad in [
+            "",
+            " lead",
+            "trail ",
+            "a/b",
+            r"a\b",
+            "..",
+            "a.b",
+            "con",
+            "NUL",
+            "com1",
+            "Lpt9",
+            "quick",
+            "Quick",
+            "caf\u{e9}",
+            too_long.as_str(),
+        ] {
+            assert!(save_name_error(bad).is_some(), "{bad:?}");
+        }
+        assert_eq!(save_name_error(&"x".repeat(MAX_SAVE_NAME)), None);
+    }
+
+    #[test]
+    fn a_named_save_is_new_only_listed_loadable_and_deletable() {
+        let directory = tempfile::tempdir().unwrap();
+        let save = sample();
+        // The offered name is the next numbered one, and it is a valid name.
+        let default = default_save_name(directory.path());
+        assert_eq!(default, "commander-00000001");
+        assert_eq!(save_name_error(&default), None);
+        let named = save_named(directory.path(), "My Commander", &save).unwrap();
+        assert!(named.ends_with("My Commander.json"));
+        // A name is never overwritten.
+        assert!(save_named(directory.path(), "My Commander", &save)
+            .unwrap_err()
+            .contains("already exists"));
+        // Names that could leave the directory are refused before any write.
+        assert!(save_named(directory.path(), "../escape", &save).is_err());
+        // Numbering ignores the custom name; both appear in the lists, the quick
+        // save first.
+        save_quick(directory.path(), &save).unwrap();
+        let numbered = save_numbered(directory.path(), &save).unwrap();
+        assert!(numbered.ends_with("commander-00000001.json"));
+        let listed = all_saves(directory.path()).unwrap();
+        assert_eq!(listed[0], quick_path(directory.path()));
+        assert!(listed.contains(&named) && listed.contains(&numbered));
+        assert_eq!(listed.len(), 3);
+        // The named save loads and can be deleted; other files cannot.
+        load_game(&named).unwrap();
+        fs::write(directory.path().join("config.cfg"), b"x").unwrap();
+        assert!(delete_save(directory.path(), &directory.path().join("config.cfg")).is_err());
+        delete_save(directory.path(), &named).unwrap();
+        assert!(!named.exists());
+    }
+
+    #[test]
+    fn delete_save_removes_only_a_quick_or_numbered_save_in_the_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let save = sample();
+        let quick = save_quick(directory.path(), &save).unwrap();
+        let numbered = save_numbered(directory.path(), &save).unwrap();
+        delete_save(directory.path(), &quick).unwrap();
+        assert!(!quick.exists());
+        assert!(numbered.exists());
+        let unrelated = directory.path().join("notes.txt");
+        fs::write(&unrelated, "keep").unwrap();
+        assert!(delete_save(directory.path(), &unrelated).is_err());
+        assert!(unrelated.exists());
+        delete_save(directory.path(), &numbered).unwrap();
+        assert!(!numbered.exists());
     }
 
     #[test]

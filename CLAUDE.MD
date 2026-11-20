@@ -253,18 +253,22 @@ decision below still applies.
 ### Audio decision
 
 The original music files are HMP (MIDI-like event data), not MP3 recordings.
-Use `HMP -> Standard MIDI -> local synthesis` first. On Windows, the system MIDI
-path is a practical initial option; evaluate it for timing/device behavior.
-For consistent offline rendering use an explicitly supplied/appropriately licensed
-SoundFont and synthesizer; a SoundFont is not automatically cleared for bundling.
+Use `HMP -> MIDI events -> local synthesis -> cached PCM`. GeneralUser GS is the
+owner-selected default; preserve its license and attribution. The author's
+license permits use in software projects and notes that sample provenance is
+uncertain for some included samples. The project uses OxiSynth for rendering
+and stores all 17 rendered tracks as packed PCM in the launcher's ignored
+`music.bin`; the launcher creates it only when missing.
+`FFE_SOUNDFONT` may point to a locally supplied SF2; do not redistribute a
+user-selected bank without separate permission. Never download banks or
+original game data at runtime.
 
 MP3 is possible **after synthesis**: `HMP -> MIDI -> synth -> PCM -> MP3`.
-It is not a direct file-format rename or event conversion, and needs instrument
-samples. If pre-rendering simplifies playback, prefer a local lossless FLAC/PCM
-cache, or Ogg for size; MP3 is optional. Keep source events/timing for diagnostics,
-record synth/SoundFont/settings in the cache key, and test track/loop boundaries
-and encoder delay. No converted music ships with the engine. Keep original RAW
-effects losslessly as WAV and preserve trigger, pitch, loop and volume semantics.
+It is not a direct file-format rename or event conversion. `music.bin` stores
+lossless mono PCM tracks; the pack is regenerated only when missing or when the
+launcher switches the selected source-game folder. Keep original RAW effects
+losslessly as WAV and preserve trigger, pitch, loop and volume semantics.
+Original game audio is not distributed.
 
 ## 6. Implementation phases and exit gates
 

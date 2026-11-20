@@ -64,29 +64,37 @@ Each macro is `[` plus a two-letter code (or a word) and arguments in
 | `Gr` | digits after it: emits `0x02 n` (a colour change) |
 | `Mi` | F75 argument list, F64 |
 | `Ca` | player cash `DATA_008888` via F1377 |
-| `Fm`, `Ff`, `Co` | F75 arguments, F791 names (male, female, company) |
-| `Cr` | (no calls) |
+| `Fm`, `Ff` | F75 arguments, F791 names (male, female) |
+| `Cr`, `Co` | F75 arguments, F791 company names (kind 12) |
 | `Dr` | F75/F74, F921 random, `DATA_007216`, the date `DATA_008807` via F1358 |
 | `Nu` | F75/F74, F921 random |
 | `%i` | integer argument |
-| `Ri`, `Rf`, `Re` | F305/F304 ranks, `DATA_005110`/`DATA_008911`, F1344 ff-codes |
-| `Sh` | the player's ship (`DATA_008861`, F1538) name |
-| `Si` | the player's ship object |
+| `Ri`, `Rf` | F305/F304 Imperial/Federal rank words (`0x9c5a`/`0x9c4d` ranges) |
+| `Re` | Elite-rating thresholds `DATA_005110`/`DATA_008911`, F1344 ff-codes |
+| `Sh` | the player's ship model name (`DATA_008861`, F1538; model stats `+0xe`) |
+| `Si` | the player's unique ship object string (`DATA_008861+0x124`) |
 | `Sl` | F921 random choice between quoted alternatives (`[SlL1("his","her")`) |
-| `Oo` | random choice, recursing into F76 |
+| `Oo` | F921 choice among nested alternatives, recursively expanded by F76 |
 | `Pn` | the commander name `DATA_008919` |
-| `Zz` | F74, `DATA_008567` |
+| `Zz` | F74 index list; reset the selected lazy-random-word slots in `DATA_008567`; emits no text |
 | `Sy` | F860/F461/F462/F463 system picks, F921, the current system `DATA_008885` |
-| `Ci`, `A`, `F`, `C`, `I`, `Impmine`, `impmine` | (no calls: fixed words or flags) |
+| `Ci` | F75/F74 and the F858/F860 generated-system branch; exact output conditions still need a source mapping |
+| `A`, `F`, `C`, `I`, `Impmine`, `impmine` | fixed words or flags in F76's argument handling |
 | `Pl` | `DATA_002295`, F74/F75, F858 planet names |
 | `Imp riot`, `F edge`, `Imp edge` | F921 picks from `DATA_002289`/`DATA_002291`/`DATA_002290` |
 | `disput` | `DATA_007107..7109` (disputed systems), F921 |
-| `Sc`, `Cs` | `DATA_002296`/`DATA_002297`, F858/F860, F1377 |
+| `Sc` | `DATA_002296`, F75/F74, F858/F860, F1377 (coordinates) |
+| `Cs` | `DATA_002297`, F75 (consumes one following source byte), current system `DATA_008885`, F860 |
 | `Sr` | F921, F1538/F1344 ship names, recursing into F76 |
 
 `L1`, `L2`, `R(n)` and similar suffixes are F75's argument forms (slots
 the article fills once and reuses, e.g. `[SyL1(I)` is "system 1, chosen
 Imperial").
+
+The archive census finds `[Da` once, in a raw `MISSION.DAT` article. `Da` is
+not an entry in JJFFE's `DATA_102307` dispatch table (`ffedat.asm:3033-3034`),
+so it is not an F76 macro to implement; leave the source article's unknown
+prefix handling to F76 rather than treating it as another macro family.
 
 ## Viewer (F79-F84)
 
@@ -115,9 +123,12 @@ Imperial").
   local newsagent."), `DATA_002306` ("... issues remaining") and
   `DATA_002307` ("No subscription") are the subscription messages.
 
-Ported: F78-F81's page (`ffe_rs::journal_page`). Still open: the
-subscription messages and F76's remaining macros (the journals' systems,
-ranks and alternatives).
+Ported: F78-F81's page (`ffe_rs::journal_page`), F76's archive subscription
+column, and its `Sl`/`Oo` alternative, `Re`/`Ri`/`Rf` rank, `Sh` ship-model,
+`Cs` current-system and `Zz` random-word-reset macros. The
+subscription strings `0xa605`/`0xa606` use imported text at x=200, colour 0xf,
+with the source's period-based remaining-issue count. Still open: F76's system,
+ship-object and other unported macro groups, plus remaining text source-oracle gates.
 
 ## Who fills the journals: the mission-script engine
 

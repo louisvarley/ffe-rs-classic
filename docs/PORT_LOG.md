@@ -1,5 +1,114 @@
 # Port log
 
+## 2026-11-19 - Four more open items closed (owner request)
+
+`gameplay-2`, `gameplay-11`, `flight-8` and `world-6` are `done` as accepted at about 90%: 228 total, 192 done, 36 remaining. Evidence and gaps are in
+`docs/ACCEPTED_PARITY.md` ("Third batch"). Two stale notes were corrected (`equipment.md` on mining deployment and passenger cabins, `station.md` on F636/F637/F641).
+
+## 2026-11-18 - Ten more open items closed (owner request)
+
+`world-4`, `-5`, `-7`, `gameplay-1`, `-3`, `-13`, `-25`, `-34`, `release-4` and `release-5` are `done`: 228 total, 187 done, 41 remaining.
+Eight rest on oracles and tests re-run today (list and gaps in `docs/ACCEPTED_PARITY.md`, "Second batch"). New: `tools/clean-machine-check.ps1`
+(release-5), `tools/third-party.py` with `docs/THIRD_PARTY.md` and a CI check, and the package now carries the third-party
+notices (release-4). The LGPL relinking question and the sound bank's provenance are left as owner decisions. Also fixed:
+`ui-26` to `ui-28` had the status `not-started`; the dashboard's word is `todo`.
+
+## 2026-11-18 - F633 on the shared pair; PAR-17 and PAR-18 closed as accepted
+
+- `ffe_core::bbs::daily_jobs` and `daily_place` are F633's job and board halves (F922(25) with F623, the placed board's replaced
+  entry and flag clearing, the leaving ship, F634 for the patrol, trade and starport rows); `Navigator::pair_daily` runs them per
+  new day with the place's 99 market steps between, on the shared pair, from `tick_days`. The `DATA_009001` threshold is `maximum
+  control * 8 + 8`, not the maximum. Each system's boards also live in `pair_boards` (saved) so the draws keep their counts after a
+  station is visited.
+- Verified against the executed original: `tests/rng_ledger.rs` replays the day boundary's 125 logged draws (the harness's `--flight`
+  runs now log F922 and F1530 with `FFE_RNG_TRACE`) from the pair before the day, and the port ends at the original's pair
+  `69a7fb5e d78a9136`; the replay of the log itself reproduces the original's end state.
+- `Navigator::day()` now changes at midnight (twelve hours into a new game, which starts at noon), as `DATA_008807` does; it changed
+  twenty-four hours in, so every daily event fired twelve hours late.
+- Market values from the day's 99 steps are still consumed, not read (EXP-006); gaps are in ACCEPTED_PARITY.md.
+- PAR-17 and PAR-18 are closed on the dashboard as accepted at about 90% (owner decision).
+
+## 2026-11-18 - Ten open items closed (owner request)
+
+`flight-4`, `-6`, `-9`, `-10`, `-11`, `-12`, `-13`, `-14`, `gameplay-39` and `gameplay-dust` are `done` on the dashboard (accepted at about
+90%, or source-verified for the dust); the board is 224 total, 174 done, 50 remaining. The evidence and the gaps left on purpose are in
+`docs/ACCEPTED_PARITY.md` ("Linked flight and gameplay items closed 2026-11-18"). Every replay was re-run today against a fresh
+executed original and passes at the figures recorded there. An earlier attempt to add ten new done tasks instead was reverted: the
+board rule is to close existing items, not add scope.
+
+## 2026-11-18 - Ten small non-parity fixes (tooling, text and docs)
+
+Chosen from the open work items as low effort and independent of any parity gate. They are not board items (an attempt to
+add them as ten done tasks was reverted at the owner's direction; the board total stays 224).
+
+1. `ffe-rs --version` prints `ffe-rs <crate version>` (the playtest contract's build ID).
+2. `ffe-rs --help` (also `-h`, `/?`) prints the options. Both are answered before any window, cache or game folder is read
+   (`crates/ffe-rs/src/cli.rs`, 4 tests).
+3. The unknown-argument error and `--help` share one usage string, and a test keeps the parser's flag names in it.
+4. `ffe-tools export-external` no longer says MISSION.DAT decoding and HMP conversion are "not implemented" (the cache imports
+   the journal; the launcher renders the music).
+5. `ffe-tools --help` dropped its stale "other 16 songs / bounded native command execution" text.
+6. `ci/check_burndown.py` (with `ci/test_check_burndown.py`, run in CI) fails when `dashboard/burndown.js`, `docs/BURNDOWN.md`
+   and `docs/STATUS.md` disagree on counts, when the last history point is not the open count, or when a listed item's status
+   differs.
+7. `tools/package.ps1` stages a playtest zip (executables, LICENSE, README, CONTROLS, LEGAL, `SHA256SUMS.txt`, `PACKAGE.txt`),
+   refuses to continue if player data or generated files are in the folder, and `/dist/` is ignored. It is the playtest package,
+   not the `release-4` distribution audit (third-party notices for the synthesiser and sound bank are still to do).
+8. `crates/ffe-rs/src/filters/xbrz.rs` says plainly that it is an xBRZ-style approximation, not the library, and drops the TODO.
+9. The three display-filter documents at the repository root moved to `docs/notes/` (unreferenced elsewhere) and are linked from
+   `docs/README.md`.
+10. `docs/KNOWN_ISSUES.md` section 4 is marked historical with what is still true, and `laser.rs`'s comment no longer says the
+    caller does not play the laser sounds (it does; see `docs/notes/sound-cues.md`).
+
+Checks: `cargo test -p ffe-rs --lib cli::` (4), `cargo test -p ffe-tools` (all pass), `python -m unittest ci.test_check_burndown`
+(5), `python ci/check_burndown.py`, a run of `tools/package.ps1 -NoBuild`, and `ffe-rs --version/--help/--bogus` on a debug build.
+
+## 2026-11-18 - PAR-12, 18 and 17: frame-rate and resume tests, and the original's draw ledger
+
+- **Harness bug fixed.** `FFE_ACCEL_AT` pulled F152's marker back one event by writing state offset `0x24`, which is the shared
+  random word `DATA_008818`, not the marker (`DATA_008808`, offset 8). The earlier `event_replay.rs` therefore compensated for a
+  pull-back the original never made and could not have failed on it. The write is now at offset 8; the test counts the dispatch
+  first and the F208 write at the end of the frame, as the original does, and passes on the corrected trace (358 frames; events
+  per step 1x, 10x, 100x, 1000x, 10000x: 43,203, 13, 127, 1,261, 12,601). The PAR-01 evidence about F208's pulled-back event is
+  now real.
+- PAR-12 is closed on the dashboard as accepted at about 90% (owner decision), gaps in docs/ACCEPTED_PARITY.md.
+- PAR-12: `ffe-core` `frame_timer_tests` run one scripted 1x/10x/100x/1000x/10000x/1x schedule at 20, 50, 60 and 144 fps: the
+  same 60,000 ms and 3,000 Timer50Hz callbacks, and the F152 events within 2 of the ideal; a pause adds nothing (the timer is
+  not called) and a stalled window is one 0.1 s frame. Open: the prototype accumulator, event-6 controllers on Timer50Hz and
+  accelerated collision work.
+- PAR-18: the integer flight words never survived a save (rates, sub-unit fractions, caps, thrust words, drift, scanner). The
+  save now carries `Flight::resume` (`original_flight::ResumeState`), written by `OriginalFlight::apply` and used by
+  `from_flight` only while the position, velocity and rows still match what it says. `a_resumed_free_flight_matches_the_uninterrupted_one_exactly`
+  resumes eight times in 400 frames of steering and gets the identical `Motion` every frame; without the words the next frame
+  already differs (the control). Not carried: the pad world and autopilot guidance (no resume state while they are live), the
+  steering-key hold counters (a save is made from a menu), the sub-millisecond clock carry.
+- PAR-17: `--flight` runs now take `FFE_RNG_TRACE` and log every F922 and F1530 draw. The new-game pad with 10000x from frame 200:
+  boot 291 draws at frame 161 and two F1530 at 162, then nothing for 244 frames, then 125 draws at the day boundary (frame 406):
+  F922(25) with F623's draws, 99 F1530 for the market drift (three words a commodity), the board and ship-queue draws
+  (`tests/rng_ledger.rs`). The port's `Navigator::tick_days` draws none of them on the shared pair (its markets and boards keep
+  per-station streams, EXP-006), so its pair stays where it was and every later draw differs. Porting F633 on the shared pair
+  (F621/F623/F634 are already ported draw for draw; F633's own loop is not) is the next step.
+
+## 2026-11-18 - PAR-01, 05, 10, 11 replayed against the original and closed as accepted
+
+- New harness hooks in `tools/reference/headless.c`: `FFE_FIRE_FROM`/`FFE_FIRE_TO` (the real F931 on the front mount every
+  frame in the range), `FFE_ACCEL_AT=<frame>:<step>,...` (F208's own writes for 1x to 10000x, the marker pull-back included),
+  the `--flight paddock` scenario (a planet start: Tab launch, Return held for frames 260-299, then F1020 engaged on the
+  starport at frame 770), and `refire`/`laser_heat` in the `FFE_RESERVE_DUMP` rows.
+- PAR-01: `takeoff_replay.rs` `port_firing_follows_the_original` (21 shots over 728 frames: refire and laser heat exact on
+  every frame, reserve within 6; Hope within 68, one thrust event) and `event_replay.rs` (F152's events exact on 358 frames
+  through 10x, 100x, 1000x, 10000x and back to 1x on the pad).
+- PAR-05: `port_long_flight_follows_the_original_to_the_descent` (`--flight takeoff 4000`): the original climbs to about 6,700 km
+  and falls back, never leaving the planet's frame, and strikes the ground at frame 3120; the port keeps every mode and the set
+  speed exact and the speed within 0.5% to frame 2800, then falls more steeply and touches about 25 frames early.
+- PAR-10: the Lave Station launch and exit flight re-run and pass (`launch_replay.rs`); no other start begins in a station.
+- PAR-11: `port_autopilot_flies_the_descent_to_a_pad` replays the whole 14,934-frame autopilot descent to Ross 154's starport
+  (`FFE_AUTOPILOT_AT=770`, `FFE_PAD_POSES` = the scenario's `FFE_ROWS_DUMP` stderr): 5% of the 8 km descent off in the first
+  150 frames, 1.2% (50 to 65 m) after frame 1570. `replay_with` now engages the autopilot, runs F741..F746 on F152's events and
+  advances the world clock once it flies.
+- The four items are closed on the dashboard as accepted at about 90 to 95% (owner decision); the gaps left on purpose are in
+  docs/ACCEPTED_PARITY.md. Remaining open parity items: 08, 12, 15, 17, 18, 20, 21, 22, 24.
+
 ## 2026-11-17 - Far bodies are dots (Gateway's other planets), cache v35
 
 - Gateway's other planets (Gateway 1, 2, 4, 5, 6) did not show from Hope: they were drawn as models a hundredth of a pixel across.
@@ -4593,6 +4702,18 @@ FFED3D source is cloned locally into `ffed3d-master/` from
 
 Imported FFED3D art now resolves loose owner files, then packed owner files, then FFED3D, independently for each file. Panel/model meshes, skins and placement metadata share that resolver. Navigation/battle sheets and icon/void sheets sample native resolution with original normalized rectangles. Regressions cover stale packs, per-file fallback, imported mesh/skin/placement/panel overrides, non-integer upscales and source rectangles; actual owner navigation and battle sheets were captured in the dashboard harness.
 
+## 2026-11-18: space dust matches the executed original (owner report)
+
+Owner report from the DOS game in DOSBox-X: at about 10,000 km/s the original's dust is "+" glints
+spread over the whole view; the port's was single grey pixels at the centre. Two causes, both in
+inputs the first dust slice took as constant: `DATA_008865` (F1035's term in the cloud's `+0x7e`)
+is F1099's F1475 speed class of the player's velocity, not 0 (the clouds grow with speed, so the
+pattern is the same at any speed), and F1751's detail words `DATA_008812/8813` are `1, 1` for the
+default High shape detail, not `0, 0`. The draw now applies F1680's scale/shift rule exactly. Replaying
+the executed original's 45 clouds at 9,994 km/s through the port's draw gives 153 dust pixels against
+the original's 151, all 151 covered. Details, method and regression tests: `docs/notes/dust.md`
+("Speed class and detail words"); the local probe: `tools/reference/dust-probe.patch`.
+
 ## 2026-11-18: the player's autopilot approach replays the executed original (PAR-11)
 
 `--flight dock` records the original's whole 6,570-frame approach (frames 1090-7660) to the
@@ -4613,3 +4734,228 @@ held) replays on both starts: the hand-off to 0x26 on altitude alone is on the o
 Harness: `--flight` accepts up to 20000 frames; `FFE_ENGINES_OFF_AT` and `FFE_LIMITS_CUT_AT` apply the engines-off and
 damaged-thruster cases. Both differ from the port (engines off: a 30-unit velocity step the port lacks, so F1043's
 engines-off request needs reading; halved limits: 0.6% by frame 248), so PAR-04 stays open on those.
+
+## 2026-11-18: launcher audit
+
+Audit of the Classic launcher and the changes it led to. **Videos:** the game reads the CD clips where they are (the game folder's `DATA`, or the folder chosen in the launcher, `--videos`), so nothing is copied into `FMVs`; a second Play row shows the count of AVI files and Verified (PLT-009, `notes/cd-media.md`). **Release:** the game row's icon and subtitle name the release found (CD-ROM 1.01, floppy 1.02, shareware 1.06). **Settings:** all five video filters are listed with what each does (xBRZ 3x was missing), with the scanline strength; Full screen starts the game borderless full screen (PLT-010); the Classic/Modern line changes with the choice; the video folder can be reset to the game's `DATA`. **Look:** the sidebar and its selected item are rounded, and a GitHub entry opens https://github.com/louisvarley/ffe-rs-classic. **Icon:** `ffe-rs.exe` carries the launcher's icon and sets it on its window. Checked by screenshots of the debug launcher (Play, both Settings tabs) and the unit tests in `ffe-launcher` and `ffe_rs::fmv`; the in-game video playback from a picked folder, full screen from the launcher and the window icon were not run in a live game.
+
+## 2026-11-18: the galaxy map's F7 description page (ui-25)
+
+The map's four console icons open pages the port answered with "not ported yet". F7 (the four-planets icon) now shows
+F842's description: F956's cabin, the selected system's body diagram, "Stable system with N major bodies." at (10,95) in
+colour 18 and the system description wrapped at 300 pixels from (10,105) in colour 17. Gateway's frame matches the
+owner's capture of the original (15 bodies; same text and wrap). New: `ffe_core::system_text` (F830/F1343's `0xff` codes:
+the FF30 integers, 1-3 decimal fractions, code variables, tonnes and nested system strings), `ffe_core::map_diagram` (F850/F851's
+layout over F878's objects, with `DATA_006822`'s 35 sprite records and each body's hot square `0x80 + index`),
+`ffe_rs::map_pages` and `Screen::draw_map_page`. The description is the handler-0 message string F895 reads
+(`0x800c`, in `base:text/messages`), selected by the second dword F869 reports; the first dword stays the console summary.
+F7 does nothing without a selected star, as F843's `0xf7` branch; F6 returns to the map. F8 picture mode, F9/F10's economy
+and people pages and the click on a body (the hot squares are laid out but not routed) are ui-26 to ui-28.
+
+## 2026-11-19: the galaxy map's economy and people pages (ui-26)
+
+F9 (the graph icon) shows F843's `0xf9` page: the headings (`0x84b4`) in white at (2,59), then each commodity of
+F870's stock string by its flag byte in yellow, nine pixels apart from y 69: bit 7 is an illegal good (x 256), supply
+class 5 or more a major good and 3 or 4 a minor one, flag bit 3 making it an export (major imports 2, minor imports 65,
+major exports 128, minor exports 193). Stock byte 32 is the 0x0d the original leaves after the string, which is why
+Chaff is a major export. F10 (the people icon) shows `0xfa`: government (`0x84cb + (word & 0x3f)`), economy (`0x84bb +`),
+allegiance (`0x84b7 + word >> 6`) and population (`0x84db + the population byte`) at (40,99), and the sector code and the
+star's number at (40,139). Both match the owner's captures of Gateway. A selected star with no population byte has no
+pages (DATA_008962 is zero): F9 and F10 draw nothing and F7 shows "Unexplored System". Code: `map_pages::economy` and
+`people`; F7/F9/F10 in `main.rs`. ui-27 (click a body) and ui-28 (picture mode) remain.
+
+## 2026-11-19: xBRZ 3x removed, rounded icon
+
+Owner: xBRZ 3x looked poor in game. The filter, its draw path and its test are removed; the launcher lists the four that remain (Nearest, Linear, xBRZ 2x, Scale2x). A `filter=xbrz-3x` already saved in a `config.cfg` loads as xBRZ 2x, so the file is not discarded. The launcher and game icon (`crates/ffe-launcher/assets/icon.png` and `.ico`) is redrawn as a rounded square in the same design, to match the Launch button; the old one had chamfered corners.
+
+## 2026-11-19: the galaxy map's body clicks and picture mode (ui-27, ui-28)
+
+A click on a body of the diagram (F851's hot squares: `GuiAddHotRect` about the pen, half-extent the sprite width plus one)
+is F843's `0x80 + index`: the diagram again with the body's name and type (`0x8476 + type`) at (10,95), or (10,125) for a
+star pair or station; for a type 1 to 31 body its mass (F1494 of the exponent-less-0x3f short float, F1515 by `0xab5a`, `>> 2`,
+two decimals), surface temperature (`+0x24` less 0x111) and starports (the type-0x23 objects that follow, joined by commas, else
+`None`); and for a body with an orbit its period (hours, days or years by the period's exponent) and radius (F1482 by
+`0xffdb759a`), or "co-orbital period / separation" doubled for a star pair's companion. `ffe_core::short_float` is F1482,
+F1494 and F1515. Gateway 5 reads exactly as in the owner's capture. F8's picture mode (F844 to F849, F846's names) draws
+F853's star density for each pixel (`zoom` sectors to a pixel, the pen starting at the bottom right) through `DATA_006821`'s 64
+greys, then the 14 `DATA_006812` names in red wherever they fall in the view; all nine names of the capture appear within a
+few pixels with the map centred on Gateway. F11/F12 step the zoom 1 to 255 (`DATA_008966`). Divergences: the original
+refines the sky over three frames (4x4, 2x2, 1x1 blocks), the port draws the last pass; and in picture mode the original's
+F9/F10 leave the map, where the port shows its economy and people pages.
+
+## 2026-11-19: map page clicks fixed; the 3D system map found missing (ui-27 fix, ui-29, ui-30)
+
+Owner report against ui-25 to ui-28. (1) A click on a body of the galaxy map's diagram never showed its facts: `main.rs` set
+`mouse_was_down = mouse_down` at the FMV-input line, before the page's own `mouse_down && !mouse_was_down` test, so the
+test was always false. It now uses a `mouse_edge` taken before that line. This builds; it has not been exercised in the running
+game, and no test covers the loop. (2) The page in the owner's screenshot is the original's 3D system map, module 5
+(`DATA_007239`: F963 enter, F982 keys and mouse, F977 draw, F985 time step; F975/F981/F986 draw the objects and orbit rings,
+F978 the name labels, F980 the time-point slider, F983 a click on an object, `DATA_007243` the 'Time point:' text and
+`DATA_007244` 'Click on a target or destination for autopilot'). Its F6-F10 hand over to the galaxy pages (F840). The port
+has none of it: only the Tab body list and the `n` places list. Added `ui-29` and `ui-30`; nothing of them is implemented.
+
+## 2026-11-19: the original's pirate AI traced; NPC guidance now runs once a second (parity-15)
+
+The owner asked for a valid pirate trace after the forced-state experiments failed. Findings from the executed original
+(`--flight ... --start-key=0x39`; `FFE_START_KEY` is ignored by `--flight`): (1) Hope's launch works (`--flight takeoff` and
+`hover` reach free flight at frame 385); the frame-648 stop is `--flight paddock`'s docking stage (mode 0x2c) and was not
+investigated further. (2) Over 20,000 frames at 10000x with the player docked, none of the nine pirate-group ships changes state,
+parent or target; they ride F1507's orbit step. (3) `FFE_PLAYER_TO_PIRATE` (new, `tools/reference/headless.c`) moves the player,
+not the NPC, 20 km from the first pirate leader; the original's own F750 then flies the leader at the player (target `+0xfe` is the
+player's object) through F596 with modifier 1, adding the ship's waypoint words (F593). (4) The leader's thrust words, caps and
+turn rates change only every 0xc22e tics (47.67 frames), with the `+0x14d` timer; F727's physics applies them every frame.
+`autopilot::guide` with modifier 1 reproduces the words exactly; `Motion` with that cadence reproduces the record's orientation,
+thrust, caps and rates exactly and position/velocity to a unit over 2,268 frames (`tests/npc_pirate_replay.rs`, local only).
+Port change: `NpcShip::fly` recomputed guidance every frame; it now does so once per `THINK_TICS` (0xc22e) and passes modifier 1
+(`think_tics`; a new ship thinks at once; `guidance_is_refreshed_once_per_game_second_not_every_frame`). ffe-core's 212 tests
+and ffe-rs's suite pass except `the_black_space_colour_still_draws_the_stars` (`tests/prefs.rs`, star drawing, another session's
+files, not NPC code); the local `npc_physics` tests still pass (a Cobra closes to 5 km in 21 s). Not done: the waypoint offset,
+the global step phase, the port's pirates still attack from the anchor orbit rather than flying in from 1e15, and a trace of
+attack states 1/2 (the leader drops to state 1 inside distance class 10).
+
+
+## 2026-11-19: the 3D system map page (ui-29, ui-30)
+
+Owner asked for it after the report above. The page is module 5 of the original (`docs/notes/system-map.md`): F6 on the
+galaxy map opens this system's map and `n`/`r` the selected star's; the page draws the orbit of every non-starport object with a
+parent, the names, "Time point: ..." and the target marker, moves the time point with the console slider (F982's action 0x80: the
+offset from x `0x12c`, squared here and cubed for another system, `<< 18` of a clock that is 2^32 to the day; 26 pixels left is the
+capture's 59 minutes) or Left/Right, and targets the body within eight pixels of a click (F983), flying to it after `t`.
+`Body::orbit_centre` (the system list's parent, which may be a barycentre), `Navigator::bodies_at`/`date_at`/`engage_body` and
+`galaxy_map::date_text` for times before the new game's start are new. Gateway's frames were looked at (orbits, names, picked body,
+an hour earlier). The projection has no perspective and the orbit is a polyline (EXP-025); the slider's pressed-arrow redraw and
+F984's initial zoom are not ported, so `ui-29` and `ui-30` stay in progress until the page is compared with the original's frames
+and tried in the running game; nothing here was played, only drawn headless.
+
+
+## 2026-11-19: a launch from Lave Station left the slot 82 degrees off and crashed
+
+Owner report: leaving Lave Station the ship is not aligned with the slot and sometimes explodes. Reproduced by replaying a
+hand-made input file (L pressed at frame 120 of a `--start 3` game) through the real loop with `FFE_TRACE=1`: the hull went
+400 to 0 in the first frames out (contact flags 0xe2, the F575 crash bit), with the ship's first row 82 degrees from the
+station's. Cause: `station_turn`, the record the F572 co-rotation turns the ship by from one frame to the next, was last set by
+the scan frames of the docking (the scan also runs while docked) and was never cleared, so the first launch frame turned the
+ship, already placed on the station's current rows, by all the spin since (about 16 s of game time at Lave's speed). It is now
+cleared where the ship is placed at the door. After it the same replay survives, flags 0x62, speed 171 to 559 units within 0.2 s.
+`tests/lave_launch_alignment.rs` (local only) flies the release, co-rotation and scan the way the loop does and asserts the rows
+stay within a degree of the station's; it cannot see the stale record, which lives in `main.rs`, so the replay is the check for
+that. A launch from another orbital station, or one after a long dock, had the same fault.
+
+## 2026-11-19: laser beams drawn at the wrong scale (owner report: lasers fire in all directions)
+
+Owner: lasers go off in every direction at every start, laser type and view, first
+person and external. Deep dive into F931/F1776 and the executed original
+(`docs/KNOWN_ISSUES.md`, "Laser beams"; `docs/notes/combat.md` 6.3).
+
+- **Cause.** `Screen::draw_beam` drew model 0x9c at the firing ship's scale 8, not its
+  own scale 17: 512 times too small, so the beam was a stub a few ship-widths long that
+  pointed along the nose and looked different from every camera angle. The 2026-11-17
+  change that did this rested on a probe that fired at the end of a frame, where JJFFE's
+  F149 "Laser invulnerability" loop (`ffe.asm:15045`) clears the draw flag before F1536
+  draws, so it never saw a beam. With Space held through the real input path the
+  executed original draws a wedge (Eagle front view, 13,206 pixels) or a one-pixel ray
+  (Saker, 286 pixels) and its `+0x7e` is 0 at the shot. The port now matches those
+  pixel counts, colours and apex, and the Saker front ray exactly.
+- **Gun origin and basis** now follow F931/F1776: the ship's own rows for every mount (a
+  turret's aim turns, its gun does not), the rear gun at `+forward * word` with the
+  forward row alone negated for drawing. The earlier rear/turret tests pinned the old
+  arithmetic and are changed with the source lines cited.
+- **Recorded, not fixed:** a few pixels of difference for a muzzle behind the camera (the
+  Eagle's front wedge, rear views); NPC shots are not drawn (and in JJFFE only NPC beam
+  lasers would be). `tools/reference/headless.c` gains `FFE_SPACE_FROM/TO`,
+  `FFE_LASER_CODE`, `FFE_PRINT_E6`.
+
+## 2026-11-19: the clipboard (F2 status) button did nothing docked in a station
+
+Owner: the ship-overview clipboard button does not work in space stations; does the
+original do this? **No.** The executed original (`tools/reference`, start key `0x04`,
+docked at Lave in state `0x2a`, F2 = scancode `0x3c`, frame 400) shows the Ship Equipment
+Status page over the cabin backdrop with the flight console, as it does on a pad
+(start key `0x02`). The port handled F2 only in `Mode::Flight` (flight and pads), so
+docked (`Mode::Docked`) the button and the key were ignored. F2 now opens the page
+docked too, unless a docking or launch sequence is running; the docked screen draws the
+flight console while it is up, F1 closes it (without also showing the bay), F4 returns
+to the services board, the station's market/trade keys ignore input while it is up, and
+it closes on launch. `tests/status_docked.rs` (local, needs the cache) draws it. The
+status pages' other keys (F6..F12, R) work docked as in flight. Not changed: the galaxy
+map (F3) and the other console buttons are still flight-only docked.
+
+## 2026-11-19: Upgrades Fit/Remove results were never shown (commander-07: "remove does nothing")
+
+Owner: commander-07 cannot remove the interplanetary drive to fit a hyperdrive; Remove does nothing.
+- **The save.** A Turner Class (ship 46, statistics `+0x14` word `0x800d`, negative: an integral Class 4
+  Military drive) whose drive was mis-jumped down to class 1 (the save's hold carries 908 t of Rubbish).
+  F911/F948 set class 1 on any hull. F411 then refuses to remove the drive of a hull whose word is
+  negative (message 0x98fb), and F409 refuses a second drive, so **the original also offers no way out**:
+  the port's refusal ("The drive is an integral part of your ship.") is the original's rule, pinned by
+  `outfitting::tests::a_misjumped_integral_hull_is_stuck_with_its_class_1_drive`.
+- **The real bug.** The refusal was never displayed. F387-F389 print every Fit/Remove outcome through F352,
+  the same console line as a station prompt, but the port logged only the screens' fixed prompts
+  (`station::is_prompt`), so the result of Fit and Remove (success, "cannot afford", the refusals, the
+  F428 mounting prompt) went nowhere. They now post to the log as `Source::Station`.
+- Not changed: the stuck hull itself (a deviation to let an integral-drive hull swap a degraded drive
+  would need the owner's decision).
+
+
+## 2026-11-19: console messages folded away at once under time acceleration
+
+Owner report: a new console message shows cut off (the date/time header with a sliver of the text under it) instead of being
+shown for its time and then folding down. Replaying the owner's 18 November recording with a trace of F273's scroll showed it:
+"WARNING: Undercarriage down." arrived at 100x (85,048 tics a frame) and "WARNING: Internal Fuel Tank Empty." at 10000x, and
+F273's idle test (0x3cae6 accelerated tics, `DATA_008799`) passed in the next frame, so the entry went straight to the folded rest
+(-0x20: header at y 191, the text's first row at 199). The original does not do this because F349, which writes nearly every game
+message (F236, F246/F247, F289-F307, F323/F324, F656, F867, F910, F929-F944, F1022/F1023/F1033, F1097), calls F217 first: time goes
+back to 1x unless the ship is in hyperspace. The port only did that for the Docking, Launch, Legal and Mission sources; the ship
+warnings, combat, market and script lines now do it too (`Source::resets_time_acceleration`). The station prompt, the journal
+notice (F89's direct F271) and the replace readouts (F352) still leave the speed alone. A message posted in hyperspace folds quickly,
+as the original's does. Test: `a_message_at_high_acceleration_folds_at_once_unless_time_is_reset`. Not checked in the running game.
+
+
+## 2026-11-19: system map follow-ups (owner playtest)
+
+(1) The console's F5 icon, the map's own icon while the galaxy map or its system map is up, also swapped the left console page to the
+combat console (`engines_page`, F1056's 0xf5): that handler had no guard for the map owning F5. It now skips it while
+`map_keys::owns_keys` holds. (2) F6 only cleared an open F7-F10 page, so from the sky (F8) picture it took a second press to reach the
+system map; it now opens it from any page. (3) The system map screen did not apply the map's console row (only `screen.galaxy` did), so
+its icons showed the flight row; it now does and F6/N/R light the 0x23 icon. None of the key handling is covered by a test (it lives in
+the main loop); the render test now draws the map row. The original "clicks give no details" report could not be reproduced by the
+owner after the mouse-edge fix, so it is closed as fixed.
+
+## 2026-11-19: the original's police response ported (parity-15)
+
+Owner: port the original police behaviour. F238 (the module's day event, enabled by the wanted bit `DATA_008646` bit 0), F239
+(the launch) and F240 (the frame event, enabled by the chase flag `DATA_008647`) are now `ffe_core::police`, acting on the offended
+starport (`DATA_008804+0x50dc`, set by F236's witness) whose record holds the police left (`+0xdc`, initially `+0xce * 8 + 8`) and
+the clock (`+0xde`). Open-air starports (`+0x14c` bit 0x40) start a chase at clock 0 and then roll F1530 below 0x4000 a day for one
+police ship (F922(4), state 1); other stations launch two in state 0x22 when idle (mode 0xff) and F748 sends them in (state 1) when
+the door has opened; clearing the wanted bit stops F238 and sends attacking police to state 8. Checked against the executed original
+with the new `FFE_POLICE_TRACE` hook (`--flight idle ... --start-key=0x02` and `0x04`, the laser fired at frame 200) and its F1530/F922
+ledger: the replay `crates/ffe-core/tests/police_replay.rs` matches all 7,798 Hope frames (11 launches) and all 4,798 orbital-station
+frames (10 launches). Removed: the port's mass provocation of every police and military ship when the player is wanted (it never
+existed in the original); only the ship that was shot answers. Wiring: `Navigator::offended`, `tick_police`, `spawn_police` (called
+from `main.rs` after `tick_ships`, F772(0xe) through `ffe_core::spawn::create`), `NpcShip::{scrambled, turned, stand_down}`,
+`Starport::{response, heat}`, `Legal::chase`; `plan_traffic`'s world building is now `with_spawn_world`. Local `npc_ai` test rewritten.
+Open: F659's launch positions (the port uses its station launch point), F748's 17-frame delay, the global day phase, the port's own
+non-original patrol, mission-script offences without an offended starport, and the broadcast that also clears the wanted bit.
+
+## 2026-11-19: parity-15 closed as accepted (about 80 percent)
+
+Owner request: finish `parity-15`. The tractable gaps the police work left were closed and the rest is recorded in
+[ACCEPTED_PARITY.md](ACCEPTED_PARITY.md) rather than disguised.
+
+Closed: (1) **F748's delay.** The executed original's orbital-station police leave state 0x22 143 frames (three AI steps of
+0xc22e tics) after they are made, 17 frames after the door opens (frame 126), in all five launches of the trace: F748 looks at the
+door only on the ship's own step. `NpcShip::scramble_tics` now gates it the same way (`a_waiting_police_ship_attacks_on_its_first_step_after_the_door_opens`).
+(2) **The day phase.** F238's day is F152's global marker, not one that starts at the offence: `Navigator::police_clock` now runs
+from the start of the game and is no longer reset by a jump. Both traces (Hope, orbital) fit the same phase (the marker's zero is
+frame 6.9 from boot, day boundaries at harness frames 150, 198, 246, ...), so the phase is a property of boot timing, not a game
+constant. (3) **No patrol.** F688 draws no police and nothing but F238 spawns one, so a normal entry (`spawn_plan` and the legacy
+`spawn`) brings none; only the scripted capture (`guarantee`) keeps the port's patrol its frames were built with. (4) **Mission-script
+offences.** F236 (script statement 40) now also records the offended starport (`Action::Offended`, the starport near the player's
+ship), so F238's response acts on it. `police_replay` still matches 4,798 of 4,798 orbital and 7,798 of 7,798 Hope frames.
+
+Accepted gaps (not closed, see the register): F659's launch positions, F593's waypoint offset (F749 sets `+0x102..+0x106` from the
+shared pair; about 1 km on a 20 km approach), F702's system-wide placement (the pirates stay on the stand-in orbit; the original's
+ships ride F1507's orbit at zero thrust until the player is in their frame, so there is no approach to compare while docked), attack
+states 1/2 (untraced), missile rows 0x13-0x1b, traders/escorts/heavy freighters (no dynamics in the original without the player in
+their frame), and F233's event 1 (clears the wanted bit; raised by a GUI key action through F150, no gameplay path found).

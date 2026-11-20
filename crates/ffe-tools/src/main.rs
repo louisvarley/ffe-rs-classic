@@ -32,8 +32,10 @@ upscaling. It never overwrites an output and is not a graphics pack.
 build-data imports 345 bitmaps, two raw texture blocks, the fixed low palette, cabins and
 effects and main font into a deterministic partial cache. V3 adds two original
 station vertex programs; v4/v5 add root commands/normals and v6 the original sine table; v7 imports every model that decodes; v8 adds the texture descriptor table and the 12-bit fixed colour map (floppy 1.02).
-inspect-data verifies every entry. Bounded native command execution is not yet
-complete station rendering. Submodels, gameplay tables, the other 16 songs and full conversion remain absent.
+inspect-data verifies every entry. The cache is a partial import, not a
+complete conversion of the game: music is not in it (the launcher renders all 17
+tracks into music.bin) and parts of the executable's data remain unimported, so
+inspect-data's own report lists what is missing for the profile.
 verify-reference compares fixed legacy RNG/timer vectors and bounded new-game
 clock transitions against native Rust primitives. It is not full flight validation.
 model-census reports, read-only, how far each of the 465 original models gets

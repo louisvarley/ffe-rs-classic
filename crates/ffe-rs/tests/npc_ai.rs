@@ -1,6 +1,6 @@
 //! Local-only sequence for the NPC flight/combat AI: a pirate fires its 1MW
 //! pulse at the player (F931/F930/F953), the player's hull takes the damage, and
-//! a clean kill makes the police hostile (the port's `DATA_008647` response).
+//! a clean kill is witnessed by the starport, whose F238 then sends police.
 //!
 //! `FFE_WORLD_CACHE=<data.bin> FFE_SHOT_DIR=<dir> cargo test -p ffe-rs --test
 //! npc_ai -- --ignored --nocapture`
@@ -193,6 +193,9 @@ fn a_pirate_fires_and_the_player_takes_f953_damage() {
 fn a_clean_kill_makes_the_police_hostile() {
     let cache = cache();
     let (mut nav, viewer, mut screen, mut state) = setup(&cache);
+    let unit = ffe_rs::original_flight::UNITS_PER_FLIGHT_UNIT;
+    let player = state.position.map(|v| (v * unit).round() as i64);
+    let radius = i64::from(viewer.model_radius(NEW_GAME_SHIP).unwrap());
     // A clean trader: the F931 crime flag and the wanted state.
     let trader = nav
         .ships
@@ -202,26 +205,49 @@ fn a_clean_kill_makes_the_police_hostile() {
     let id = trader.id;
     let name = trader.name.clone();
     assert!(!nav.legal.wanted);
+    // The traffic tick records where the player is (F236's witness test).
+    nav.tick_ships(0.02, 994, player, radius);
     let attack = nav.player_attack(id, 10_000).expect("the trader");
     assert!(attack.crime);
     assert!(attack.destroyed);
     assert!(nav.legal.wanted);
     assert_eq!(nav.legal.offences, 1);
-    // Police and military ships turn hostile; the pirates were already so.
-    let police: Vec<_> = nav
+    // F236 remembered the starport that saw it (DATA_008804+0x50dc); nothing makes
+    // the existing police hostile: F238 launches them from that starport.
+    assert!(nav.offended.is_some(), "no starport witnessed {name}");
+    assert!(!attack.police);
+    assert!(nav
         .ships
         .iter()
         .filter(|ship| ship.role == Role::Police)
-        .collect();
-    assert!(!police.is_empty(), "no police in the system");
-    assert!(
-        police.iter().all(|ship| ship.is_hostile()),
-        "the police did not react to {name}"
-    );
-    assert!(police
+        .all(|ship| !ship.is_hostile()));
+    // F240 and F238 run on that starport's record. An open-air starport (Hope's) has
+    // already stepped its clock (`+0xde`) when the first game day ends, so F238 rolls:
+    // one in four each day it launches a police ship straight into the attack and
+    // uses one of the starport's police (`+0xdc`).
+    // (The dead trader is recycled meanwhile, so count the new ids, not the length.)
+    let first_new = nav.ships.iter().map(|ship| ship.id + 1).max().unwrap_or(0);
+    let index = nav.offended.unwrap();
+    let before = nav.starport(index).police_left();
+    for _ in 0..6000 {
+        nav.tick_ships(0.02, 994, player, radius);
+        nav.spawn_police(&cache);
+        if nav.ships.iter().any(|ship| ship.id >= first_new) {
+            break;
+        }
+    }
+    let sent = nav.ships.iter().filter(|ship| ship.id >= first_new).count();
+    assert!(sent > 0, "no police were launched");
+    assert!(nav
+        .ships
         .iter()
-        .all(|ship| ship.state == ffe_core::npc::State::Attack));
-    assert!(attack.police);
+        .filter(|ship| ship.id >= first_new)
+        .all(|ship| ship.role == Role::Police && ship.is_hostile()));
+    assert_eq!(
+        before - nav.starport(index).police_left(),
+        sent as i16,
+        "each launch uses one of the starport's police"
+    );
     // A pirate is not a clean ship: attacking it is not a crime (F931's illegal
     // fire flag is the port's `legal.wanted`, which is already set here).
     let pirate = nav

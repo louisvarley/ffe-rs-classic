@@ -26,7 +26,9 @@
 //! - **F1517** (`ffe.asm:90632`) scales the inherited `+0x8c` velocity by
 //!   `DATA_009123 + 7` into a 64-bit vector and `Vec64Add` (`ffe.asm:100373`)
 //!   adds it to `+0x3e`: the dust appears ahead of the player. The distance
-//!   word `+0x7e` is `(F1530 & 3) + DATA_008865 + DATA_009123 - 7`.
+//!   word `+0x7e` is `(F1530 & 3) + DATA_008865 + DATA_009123 - 7`, where
+//!   `DATA_008865` is F1099's F1475 speed class of the player's velocity
+//!   ([`speed_class`]).
 //! - **F769** (`ffe.asm:50379`, the AI table's control slot for state `0x1b`)
 //!   removes the object when `+0x8b` (hidden) is set, when `+0x88` (F1680's
 //!   exponential distance class) exceeds `0x14`, or when the age at `+0xb0`
@@ -82,9 +84,36 @@ pub const LEAD_SHIFT: u32 = 7;
 /// `DATA_009013` (`ffe.asm:17137-17184`), which F207 copies across when the
 /// step takes effect. The 1x play value and F220's stopped time are 0.
 pub const ACCELERATION_SHIFT: [u32; 5] = [0, 3, 7, 10, 12];
-/// `DATA_008865`: no routine in JJFFE 2.8a7 writes it (it follows the mouse
-/// accumulators at `DATA_008863/864`), so it is zero.
-pub const DISTANCE_BIAS: i32 = 0;
+/// F1475's size limit: the velocity's OR-ed magnitude is shifted right until it is
+/// below `0x4000`, and the number of shifts is the speed class.
+const SPEED_CLASS_LIMIT: u32 = 0x4000;
+
+/// `DATA_008865`, the term F1035 adds into the cloud's distance word `+0x7e`. It is
+/// not the mouse accumulator its neighbours are: F1099 (the flight HUD, run every
+/// frame) stores F1475 of the player's `+0x8c` velocity there (`mov [ebx+0xd4],esi`
+/// after `call F1475`, `ffe.asm:80666`; `DATA_008865` is the player block's `+0xd4`).
+/// F1475 ORs the three velocity words' magnitudes and counts the right shifts
+/// that bring the result under `0x4000`, so the class is 0 below about 1.6 km/s and
+/// then rises by one for each doubling of speed (3 at 7 km/s, 8 at 400 km/s, 13 at
+/// 10,000 km/s). A faster ship therefore gets proportionally bigger clouds: they
+/// keep their size against the lead `velocity << 7`, which is why the original's dust
+/// fills the view at any speed instead of bunching round the line of flight. Measured
+/// in the executed original (`docs/notes/dust.md`, "Speed class").
+pub fn speed_class(velocity: [i64; 3]) -> i32 {
+    let magnitude = velocity.iter().fold(0u32, |bits, word| {
+        // The words are 32-bit in the object (`neg` of the most negative one stays
+        // negative and ORs its sign bit in, as in the source).
+        let word = *word as i32;
+        bits | if word < 0 { word.wrapping_neg() } else { word } as u32
+    });
+    let mut shifted = magnitude;
+    let mut class = 0;
+    while shifted >= SPEED_CLASS_LIMIT {
+        shifted >>= 1;
+        class += 1;
+    }
+    class
+}
 /// The original frame timer's minimum period (`tmMinFrame`): F1035 is called at
 /// most once per 20 ms, i.e. 50 times a second.
 pub const FRAME_SECONDS: f64 = 0.02;
@@ -336,7 +365,7 @@ impl Field {
             self.particles.remove(0);
         }
         let index = self.particles.len();
-        let distance_bias = jitter + spawn.speed as i32 + DISTANCE_BIAS - 7;
+        let distance_bias = jitter + spawn.speed as i32 + speed_class(spawn.velocity) - 7;
         self.particles.push(Particle {
             model: MODEL,
             state: AI_STATE,
@@ -672,6 +701,59 @@ mod tests {
         while field.attempt(&spawn()).is_err() {}
         assert_eq!(field.particles().len(), MAX_PARTICLES);
         assert_ne!(field.particles()[0], oldest);
+    }
+
+    /// F1475 on the player's velocity, checked against the executed JJFFE 2.8a7
+    /// (`FFE_DUST_AT`/`FFE_DUST_V` probe, 2026-11-18): the shift count that brings the
+    /// OR-ed magnitudes under 0x4000. `DATA_008865` read 0, 1, 2, 3, 8 and 13 at
+    /// 0.8, 1.9, 5.5, 6.6, 400 and 9,994 km/s (97.07 mm/s per velocity unit).
+    #[test]
+    fn the_speed_class_is_f1475_and_matches_the_executed_original() {
+        let units = |km_s: f64| (km_s * 1.0e6 / 97.07) as i64;
+        for (km_s, class) in [
+            (0.8, 0),
+            (1.9, 1),
+            (5.5, 2),
+            (6.6, 3),
+            (400.0, 8),
+            (9994.0, 13),
+        ] {
+            assert_eq!(speed_class([0, 0, units(km_s)]), class, "{km_s} km/s");
+        }
+        assert_eq!(speed_class([0; 3]), 0);
+        assert_eq!(speed_class([0x3fff, 0, 0]), 0);
+        assert_eq!(speed_class([0x4000, 0, 0]), 1);
+        // A negative word is negated first; the three are OR-ed, not added.
+        assert_eq!(speed_class([-0x4000, 0, 0]), 1);
+        assert_eq!(speed_class([0x2000, 0x2000, 0x2000]), 0);
+        assert_eq!(speed_class([0x2000, 0x4000, 0x1000]), 1);
+    }
+
+    /// The cloud's `+0x7e` word is `jitter + DATA_008865 + DATA_009123 - 7`: at 9,994
+    /// km/s the original's clouds read 6..=9 (class 13), not the -7..=-4 of a ship at
+    /// rest, and they are not culled the moment they spawn.
+    #[test]
+    fn a_fast_ship_gets_big_clouds_that_survive() {
+        let units = (9994.0e6 / 97.07) as i64;
+        let mut spawn = spawn();
+        spawn.velocity = [0, 0, units];
+        let mut field = Field::new(0x1234, 0x5678);
+        let mut live_max = 0;
+        for _ in 0..400 {
+            // 20 ms of 9,994 km/s, in millimetres.
+            spawn.position[2] += 9994 * 1_000_000 / 50;
+            field.advance(0.02, &spawn);
+            live_max = live_max.max(field.particles().len());
+        }
+        for particle in field.particles() {
+            assert!(
+                (6..=9).contains(&particle.distance_bias),
+                "bias {}",
+                particle.distance_bias
+            );
+        }
+        // The executed original held 45 clouds at this speed.
+        assert!(live_max > 20, "only {live_max} clouds survived");
     }
 
     #[test]

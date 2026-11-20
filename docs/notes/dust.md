@@ -86,9 +86,10 @@ F1035 is called once per flight frame from the flight module's frame handler
 9. The distance word `+0x7e` is
    `(F1530() & 3) + DATA_008865 + DATA_009123 - 7`: under acceleration each
    cloud is `2^shift` times larger (at 1000x, 0.5..4 km becomes 0.5..4,000 km).
-   `DATA_008865` has **no
-   writer** in JJFFE 2.8a7 (it follows the mouse accumulators
-   `DATA_008863/864`), so it is 0; the port keeps that as `DISTANCE_BIAS`.
+   `DATA_008865` is **not zero**: F1099 (the flight HUD) stores F1475's speed class
+   of the player's velocity there every frame, so the cloud grows with speed. The first
+   slice read it as the mouse accumulators' neighbour with no writer and kept 0; that was
+   wrong (see "Speed class and detail words, 2026-11-18" below).
 
 The port's field caps at `MAX_PARTICLES = 0x5f` (95): F928 never allocates
 below slot `0x14`, so the list cannot hold more dust objects. At 50 fps the
@@ -202,6 +203,59 @@ one `attempt` per 20 ms of F1035, then `tick` (F769). `attempt` returns a
 
 `crates/ffe-rs/tests/prefs.rs`'s `others_page_applies_stars_and_reverse_and_keeps_the_rest_inert`
 now asserts that row 0 toggles (it was inert before this slice).
+
+## Speed class and detail words, 2026-11-18 (matches the executed original)
+
+Owner report: in the original (DOS `FIRSTENC.EXE` in DOSBox-X, widescreen) the dust at about
+10,000 km/s is "+" shaped glints scattered over the whole view, almost none from the centre;
+the port drew single grey pixels bunched at the middle. Two inputs the first slice got wrong:
+
+1. **`DATA_008865` is F1099's speed class.** `F1099` (`ffe.asm:80666`) runs `F1475` on the
+   player's `+0x8c` velocity and stores the result at player block `+0xd4`, which is
+   `DATA_008865`. F1475 ORs the three velocity words' magnitudes and counts the right
+   shifts that bring the result under `0x4000` (`dust::speed_class`): 0 up to about
+   1.6 km/s, then one more per doubling (3 at 7 km/s, 8 at 400 km/s, 13 at 9,994 km/s).
+   F1035 adds it into the cloud's `+0x7e` word, so a cloud's size grows with the speed
+   that also sets its lead (`velocity << 7`): the angular pattern is the same at any speed
+   (and at any time step), and the clouds are as big as their lead, not a point on the line
+   of flight. At 9,994 km/s `+0x7e` is 6..9 and a cloud is 4,000..33,000 km across against a
+   13,000 km lead. The port had 0 here, which also made F769 cull every cloud the moment it
+   spawned above about 400 km/s.
+2. **F1751 uses the detail words.** The tier test adds `DATA_008812/8813` (player block
+   `+0x10/+0x14`, written by F228 from the Graphics page's "Level of Shape Detail" radio) to
+   the object's scale. The executed original reads `1, 1` (the default High); the viewer
+   assumed `0, 0`, so mid-depth clouds drew only their first tier and the "+" glints
+   (size-2 particles, the tiers' dots) were half as many. `Screen::shape_detail`
+   (`prefs::shape_detail_words`: Low -1/-2, Medium 0/0, High and Very High 1/1) now feeds
+   `AnimationInputs::detail` for the dust and the sky model.
+
+The draw also follows F1680's scale rule exactly now (`screen.rs`, `draw_system_effects`):
+`shift = max(msb - 0x1c, 0)`, `e = desc[+0x18] + (+0x7e) - shift`; a negative `e` lowers
+the scale (`max(scale + e, 0)`), otherwise the position is shifted right by `e` and the scale
+is kept; `+0x130 = max(-e, 0)` is the depth key and the children's scale offset. It replaces
+the earlier 1e9 mm limit (2026-11-06).
+
+**How it was measured.** F1035, F769 and F1680 in the DOS `game/FIRSTENC.EXE` (floppy 1.02)
+were disassembled and are identical to JJFFE's. A local copy of the reference harness
+(`tools/reference/dust-probe.patch`, applied to a private copy of `headless.c` at `HEAD`) runs the real game
+with `FFE_TAKEOFF=1`, teleports the ship 2,000 km up at `FFE_DUST_AT` with
+`FFE_DUST_V=<km/s>`, and prints the live model-109 objects (`FFE_DUST_DUMP=<frame>` dumps
+every cloud's position, matrix and `+0x7e`; `FFE_DUST_OFF=1` turns the dust option off so
+two runs differ only by the dust). Replaying the original's 45 clouds at 9,994 km/s through the
+port's draw: at first 104 of the port's 106 dust pixels were on original dust pixels with the
+original drawing 151; with the detail words the port draws 153 against 151, all 151 original
+pixels covered (42 single pixels and 11 "+" in both). The two extra pixels are under the
+crosshair, which the port draws a pixel differently there.
+Regressions: `dust::tests::the_speed_class_is_f1475_and_matches_the_executed_original`,
+`a_fast_ship_gets_big_clouds_that_survive`,
+`prefs::tests::the_shape_detail_radio_gives_f228s_detail_words`, and the local-only
+`effects_view::dust_fills_the_view_at_ten_thousand_kilometres_a_second` and
+`dust_detail_follows_the_shape_detail_words`.
+
+**Not changed, seen in the comparison.** The same view in the original had no Milky Way band
+where the port draws one (the stars themselves line up); not investigated, so it may be the
+palette fade of that probe frame. The port still culls and ages dust every frame; the
+original runs F769 on the day tick, so a cloud can live up to a second past its limit.
 
 ## Rendering scale (2026-10-27)
 

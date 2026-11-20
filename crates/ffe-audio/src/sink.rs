@@ -25,6 +25,10 @@ pub trait SampleSink: Send {
     /// replacing any stream playing. Sinks without a mixer ignore it.
     fn play_stream(&mut self, _pcm: Arc<Vec<i16>>, _volume: u8) {}
     fn stop_stream(&mut self) {}
+    /// Play first-run rendered music PCM, independent of the video stream.
+    fn play_music_stream(&mut self, _pcm: Arc<Vec<i16>>, _volume: u8) {}
+    fn stop_music_stream(&mut self) {}
+    fn set_music_stream_volume(&mut self, _volume: u8) {}
 }
 
 /// A recorded effect call, for tests and for the diagnostics pane.
@@ -136,6 +140,8 @@ pub struct MixerSampleSink {
     mixer: Arc<Mutex<Mixer>>,
     stop: Option<Arc<AtomicBool>>,
     thread: Option<JoinHandle<()>>,
+    #[cfg(target_os = "linux")]
+    output: Option<cpal::Stream>,
 }
 
 impl MixerSampleSink {
@@ -146,11 +152,12 @@ impl MixerSampleSink {
             mixer: Arc::new(Mutex::new(Mixer::new(effects))),
             stop: None,
             thread: None,
+            #[cfg(target_os = "linux")]
+            output: None,
         }
     }
 
-    /// Open the default WinMM wave output and start the mixing thread. On other
-    /// platforms this returns an error and callers fall back to [`Self::new`].
+    /// Open the platform audio device and start the mixer output.
     pub fn open(effects: EffectLibrary) -> Result<Self, String> {
         #[cfg(target_os = "windows")]
         {
@@ -162,7 +169,18 @@ impl MixerSampleSink {
                 thread: Some(thread),
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            let mixer = Arc::new(Mutex::new(Mixer::new(effects)));
+            let output = open_cpal_output(Arc::clone(&mixer))?;
+            Ok(Self {
+                mixer,
+                stop: None,
+                thread: None,
+                output: Some(output),
+            })
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = effects;
             Err("no wave output backend on this platform".to_owned())
@@ -208,6 +226,18 @@ impl SampleSink for MixerSampleSink {
     fn stop_stream(&mut self) {
         lock(&self.mixer).stop_stream();
     }
+
+    fn play_music_stream(&mut self, pcm: Arc<Vec<i16>>, volume: u8) {
+        lock(&self.mixer).play_music_stream(pcm, volume);
+    }
+
+    fn stop_music_stream(&mut self) {
+        lock(&self.mixer).stop_music_stream();
+    }
+
+    fn set_music_stream_volume(&mut self, volume: u8) {
+        lock(&self.mixer).set_music_stream_volume(volume);
+    }
 }
 
 impl Drop for MixerSampleSink {
@@ -223,11 +253,133 @@ impl Drop for MixerSampleSink {
 
 impl std::fmt::Debug for MixerSampleSink {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[cfg(target_os = "linux")]
+        let device_open = self.thread.is_some() || self.output.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let device_open = self.thread.is_some();
         formatter
             .debug_struct("MixerSampleSink")
-            .field("device", &self.thread.is_some())
+            .field("device", &device_open)
             .finish()
     }
+}
+
+#[cfg(target_os = "linux")]
+struct Resampler {
+    phase: f64,
+    step: f64,
+    current: i16,
+    next: i16,
+    primed: bool,
+    scratch: Vec<i16>,
+}
+
+#[cfg(target_os = "linux")]
+impl Resampler {
+    fn new(output_rate: u32) -> Self {
+        Self {
+            phase: 0.0,
+            step: f64::from(crate::mixer::SAMPLE_RATE) / f64::from(output_rate.max(1)),
+            current: 0,
+            next: 0,
+            primed: false,
+            scratch: Vec::new(),
+        }
+    }
+
+    fn fill(&mut self, output: &mut [f32], channels: usize, mixer: &Arc<Mutex<Mixer>>) {
+        let channels = channels.max(1);
+        let frames = output.len() / channels;
+        let needed = (self.phase + frames as f64 * self.step).floor() as usize
+            + usize::from(!self.primed) * 2;
+        self.scratch.resize(needed, 0);
+        lock(mixer).mix_into(&mut self.scratch);
+        let mut source = 0;
+        if !self.primed {
+            self.current = self.scratch[0];
+            self.next = self.scratch[1];
+            source = 2;
+            self.primed = true;
+        }
+        for frame in 0..frames {
+            let frac = self.phase as f32;
+            let sample =
+                f32::from(self.current) + (f32::from(self.next) - f32::from(self.current)) * frac;
+            let sample = sample / 32768.0;
+            for channel in 0..channels {
+                output[frame * channels + channel] = sample;
+            }
+            self.phase += self.step;
+            while self.phase >= 1.0 {
+                self.phase -= 1.0;
+                self.current = self.next;
+                self.next = self.scratch.get(source).copied().unwrap_or(0);
+                source += 1;
+            }
+        }
+        output[frames * channels..].fill(0.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_cpal_output(mixer: Arc<Mutex<Mixer>>) -> Result<cpal::Stream, String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| "no default Linux audio output device".to_owned())?;
+    let supported = device
+        .default_output_config()
+        .map_err(|error| format!("query default Linux audio format: {error}"))?;
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+    let mut resampler = Resampler::new(config.sample_rate.0);
+    let channels = usize::from(config.channels);
+    let error_callback = |error| eprintln!("Linux audio stream error: {error}");
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device.build_output_stream(
+            config,
+            move |output: &mut [f32], _| resampler.fill(output, channels, &mixer),
+            error_callback,
+            None,
+        ),
+        cpal::SampleFormat::I16 => {
+            let mut floats = Vec::new();
+            device.build_output_stream(
+                config,
+                move |output: &mut [i16], _| {
+                    floats.resize(output.len(), 0.0);
+                    resampler.fill(&mut floats, channels, &mixer);
+                    for (to, from) in output.iter_mut().zip(&floats) {
+                        *to = (from * 32767.0).round() as i16;
+                    }
+                },
+                error_callback,
+                None,
+            )
+        }
+        cpal::SampleFormat::U16 => {
+            let mut floats = Vec::new();
+            device.build_output_stream(
+                config,
+                move |output: &mut [u16], _| {
+                    floats.resize(output.len(), 0.0);
+                    resampler.fill(&mut floats, channels, &mixer);
+                    for (to, from) in output.iter_mut().zip(&floats) {
+                        *to = ((from.clamp(-1.0, 1.0) + 1.0) * 32767.5).round() as u16;
+                    }
+                },
+                error_callback,
+                None,
+            )
+        }
+        format => return Err(format!("unsupported Linux audio sample format: {format:?}")),
+    }
+    .map_err(|error| format!("open Linux audio output: {error}"))?;
+    stream
+        .play()
+        .map_err(|error| format!("start Linux audio output: {error}"))?;
+    Ok(stream)
 }
 
 /// The headless mixer under the name the tests use: every call is mixed into

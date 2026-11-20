@@ -27,6 +27,76 @@ pub const ORIGIN: (usize, usize) = (1, 0x11);
 /// The largest manifest read.
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
+fn is_avi(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("avi"))
+}
+
+/// How many `*.AVI` files are directly inside `dir` (0 when it cannot be read).
+pub fn count_avi(dir: &Path) -> usize {
+    std::fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .filter(|entry| is_avi(&entry.path()))
+            .count()
+    })
+}
+
+/// The `DATA` folder of an installed game (the CD's videos live there), found
+/// without regard to case.
+pub fn data_folder(game: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(game)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("DATA")
+        })
+        .map(|entry| entry.path())
+}
+
+/// The folder that holds the clips for a folder the player picked: the folder
+/// itself when it has videos, else its `DATA` child when that has some, else
+/// the picked folder unchanged.
+pub fn video_folder(picked: &Path) -> PathBuf {
+    if count_avi(picked) > 0 {
+        return picked.to_path_buf();
+    }
+    match data_folder(picked) {
+        Some(data) if count_avi(&data) > 0 => data,
+        _ => picked.to_path_buf(),
+    }
+}
+
+/// Where the game's videos are: the folder chosen with `--videos` (resolved by
+/// [`video_folder`]), else the installation's own `DATA` folder, else the older
+/// `FMVs` copy beside the data root. `Ok(None)`: none found (the videos are
+/// optional); `Err`: a chosen or listed folder is unusable.
+pub fn locate(
+    root: &Path,
+    game: &Path,
+    chosen: Option<&Path>,
+    profile: &str,
+) -> Result<Option<Library>, String> {
+    if let Some(chosen) = chosen {
+        let folder = video_folder(chosen);
+        return match Library::from_dir(&folder)? {
+            Some(library) => Ok(Some(library)),
+            None => Err(format!("{} has no AVI files", folder.display())),
+        };
+    }
+    if let Some(data) = data_folder(game) {
+        if let Some(library) = Library::from_dir(&data)? {
+            return Ok(Some(library));
+        }
+    }
+    Library::find(root, profile)
+}
+
 #[derive(Deserialize)]
 struct Manifest {
     files: Vec<ManifestFile>,
@@ -108,6 +178,41 @@ impl Library {
             return Ok(None);
         }
         Ok(Some(Library { dir, clips }))
+    }
+
+    /// The library of every `*.AVI` directly inside `dir`. No manifest is
+    /// needed: this reads a CD's `DATA` folder (or any folder of its clips)
+    /// where it is. `Ok(None)`: the folder has no videos. Names that are not
+    /// plain file names are skipped; files are never copied or changed.
+    pub fn from_dir(dir: &Path) -> Result<Option<Library>, String> {
+        let mut clips = BTreeMap::new();
+        for entry in
+            std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?
+        {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let path = entry.path();
+            if !is_avi(&path) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let size = entry
+                .metadata()
+                .map_err(|error| format!("{}: {error}", path.display()))?
+                .len();
+            clips.insert(stem.to_ascii_uppercase(), (path, size));
+        }
+        if clips.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Library {
+            dir: dir.to_path_buf(),
+            clips,
+        }))
     }
 
     pub fn dir(&self) -> &Path {
@@ -288,6 +393,48 @@ mod tests {
         // No folder: nothing to play.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(Library::find(empty.path(), CD_PROFILE).unwrap(), None);
+    }
+
+    #[test]
+    fn videos_are_read_in_place_from_a_data_folder_or_a_chosen_one() {
+        let game = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        // No DATA folder (a floppy install) and no choice: nothing to play.
+        assert!(locate(root.path(), game.path(), None, "ffe-floppy-1.02-en")
+            .unwrap()
+            .is_none());
+        // The installation's own DATA folder is used where it is, in any case.
+        let data = game.path().join("Data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("BB1.avi"), b"abcd").unwrap();
+        std::fs::write(data.join("BB1.BMP"), b"xy").unwrap();
+        std::fs::write(data.join("ST2.AVI"), b"ab").unwrap();
+        assert_eq!(count_avi(&data), 2);
+        let found = locate(root.path(), game.path(), None, "ffe-floppy-1.02-en")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.len(), 2);
+        assert!(found.contains("bb1") && found.contains("ST2"));
+        assert_eq!(found.dir(), data.as_path());
+        // A chosen folder wins, and a CD root resolves to its DATA folder.
+        let cd = tempfile::tempdir().unwrap();
+        let cd_data = cd.path().join("DATA");
+        std::fs::create_dir(&cd_data).unwrap();
+        std::fs::write(cd_data.join("G1.AVI"), b"x").unwrap();
+        assert_eq!(video_folder(cd.path()), cd_data);
+        let chosen = locate(
+            root.path(),
+            game.path(),
+            Some(cd.path()),
+            "ffe-floppy-1.02-en",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(chosen.len(), 1);
+        assert!(chosen.contains("G1"));
+        // A chosen folder without videos is reported, not ignored.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(locate(root.path(), game.path(), Some(empty.path()), "x").is_err());
     }
 
     #[test]

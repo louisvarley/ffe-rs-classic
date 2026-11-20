@@ -18,9 +18,39 @@ fn message_codes_give_the_executables_text() {
         (0x98c7, "ATTENTION: Mis-Jump - Drive Destroyed"),
         (0x9928, "You do not have enough cabin space available."),
         (0xa212, "too hot for mining with an MB4"),
+        (0xa605, "… issues remaining"),
+        (0xa606, "No subscription"),
+        (0x9c3e, "Harmless"),
+        (0x9c47, "ELITE"),
     ] {
         assert_eq!(messages.text(code).as_deref(), Some(text), "{code:#x}");
     }
+    for (index, rating) in ffe_core::status::ELITE_RATINGS.iter().enumerate() {
+        assert_eq!(
+            messages.text(0x9c3e + index as u16).as_deref(),
+            Some(*rating),
+            "Elite rating {index}"
+        );
+    }
+    for (index, rank) in ffe_core::status::FEDERAL_RANKS.iter().enumerate() {
+        assert_eq!(
+            messages.text(0x9c4d + index as u16).as_deref(),
+            Some(*rank),
+            "Federal rank {index}"
+        );
+    }
+    for (index, rank) in ffe_core::status::IMPERIAL_TITLES
+        .iter()
+        .take(13)
+        .enumerate()
+    {
+        assert_eq!(
+            messages.text(0x9c5a + index as u16).as_deref(),
+            Some(*rank),
+            "Imperial title {index}"
+        );
+    }
+    assert_eq!(messages.text(0x9c67).as_deref(), Some("\"Anonymous\""));
     // The ten imported arrays and their sizes on floppy 1.02.
     assert_eq!(
         messages.counts(),

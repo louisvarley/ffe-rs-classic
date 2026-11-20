@@ -28,6 +28,14 @@ jobs:
       - name: Test forbidden-file rules and local input exclusions
         run: python -m unittest ci.test_check_forbidden
 
+      - name: Check the burndown dashboard and its summary pages agree
+        run: |
+          python ci/check_burndown.py
+          python -m unittest ci.test_check_burndown
+
+      - name: Check the third-party licence inventory
+        run: python tools/third-party.py --check
+
       - name: Compile the local verification scripts
         run: python -m compileall -q tools/reference ci
 

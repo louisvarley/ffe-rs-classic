@@ -29,6 +29,11 @@ thread_local! {
     /// replayed; the frame being stepped.
     static TICS: std::cell::RefCell<std::collections::HashMap<u64, u32>> = Default::default();
     static NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The player's laser words after each replayed frame: refire, heat, energy.
+    static LASER: std::cell::RefCell<Vec<(u64, u16, u16, u32)>> = Default::default();
+    /// The ship's position relative to the planet's centre in the planet's rotating
+    /// frame after each replayed frame (the frame `FFE_ROWS_DUMP`'s `pos` is in).
+    static LOCAL: std::cell::RefCell<Vec<(u64, [i64; 3])>> = Default::default();
 }
 
 /// This frame's length in milliseconds: the traced one when there is a trace
@@ -99,6 +104,15 @@ struct KeyboardRow {
 fn takeoff_keys(frame: u64) -> OriginalKeys {
     OriginalKeys {
         faster: frame > FASTER_FROM,
+        ..OriginalKeys::default()
+    }
+}
+
+/// The `paddock` scenario's keys: Return and keypad 8 for the reads at frames 260 to
+/// 299 only, then none (the autopilot flies the rest).
+fn pad_burst_keys(frame: u64) -> OriginalKeys {
+    OriginalKeys {
+        faster: (260..300).contains(&(frame - 1)),
         ..OriginalKeys::default()
     }
 }
@@ -267,7 +281,12 @@ fn replay_with(
     }
     let mut mode;
     let mut altitude;
+    let mut autopilot_ended: Option<u64> = None;
+    LOCAL.with(|l| l.borrow_mut().clear());
     for frame in LAUNCH_FRAME + 2..=last {
+        if autopilot_ended.is_some() {
+            break;
+        }
         NOW.with(|n| n.set(frame));
         // The harness's test cases, applied at the end of the frame before: the engines
         // off (`FFE_ENGINES_OFF_AT`, F1056's action 9: `+0xe9` bit 0) and a damaged
@@ -281,7 +300,28 @@ fn replay_with(
             limits.axes = limits.axes.map(|axis| axis.map(|v| v / 2));
             model.set_limits(limits);
         }
-        let keys = keys_for(frame);
+        // The harness's `paddock` scenario (`FFE_AUTOPILOT_AT=<frame>`): at the end of
+        // that frame the starport the ship left is the navigation target and F1020
+        // engages the autopilot (docking computer fitted). F1020 only sets the state; the
+        // thrust the launch flight left holds until the first whole-second event.
+        if at("FFE_AUTOPILOT_AT") == Some(frame - 1) {
+            nav.lock(index);
+            nav.engage_locked().expect("the autopilot engages");
+            model.apply_guidance(model.held_guidance());
+        }
+        // Once the autopilot flies the game loop advances the world clock and carries
+        // the ship with the frame body, as `Navigator::advance`/`follow` do.
+        if nav.autopilot_engaged() {
+            nav.advance(&cache, period());
+            if let Some(moved) = nav.follow(model.absolute_position()) {
+                model.shift(moved);
+            }
+        }
+        let keys = if nav.autopilot_engaged() {
+            OriginalKeys::default()
+        } else {
+            keys_for(frame)
+        };
         let contact = if model.on_pad() {
             model.step_pad(period(), &keys, tools.as_ref())
         } else {
@@ -350,12 +390,49 @@ fn replay_with(
         mode = model.mode();
         altitude = i64::from(model.player().altitude);
         rows.push((frame, state(&model, mode, altitude)));
+        // F730 counts the refire word down in the object update, before F1007's
+        // events; the harness's `FFE_FIRE_FROM` fires the front mount at the end of
+        // the frame (F931 refuses while the word counts, the laser is hot or the
+        // reserve is empty).
+        reserve_state.combat.tick(frame_tics(), 0);
         let due = events.advance(frame_tics());
         if due != 0 {
             let thrust = reserve_state.thrust_sum(model.thrust_words());
             reserve_state.player_events(due, model.mode(), &ship, thrust);
+            // F1007 runs the AI states from the event, after the frame's flight step.
+            if nav.autopilot_engaged() && nav.sequence.is_none() {
+                match nav.source_command(&cache, &mut model) {
+                    Some((guidance, _)) => model.apply_guidance(guidance),
+                    None => {
+                        eprintln!("frame {frame}: the autopilot ended");
+                        autopilot_ended = Some(frame);
+                    }
+                }
+            }
+        }
+        if at("FFE_FIRE_FROM").is_some_and(|from| frame >= from) {
+            let _ = reserve_state.combat.fire(0, frame_tics());
         }
         reserve.push((frame, reserve_state.combat.energy));
+        {
+            // The planet's place and rows now (the navigator moves them once the autopilot flies).
+            let now = &nav.bodies[body.parent.unwrap()];
+            let at = model.absolute_position();
+            let relative: [i64; 3] = std::array::from_fn(|k| at[k] - now.position[k]);
+            let turned: [i64; 3] = std::array::from_fn(|k| {
+                (0..3)
+                    .map(|axis| {
+                        relative[axis] as f64 * f64::from(now.rows[3 * k + axis]) / 2_147_483_648.0
+                    })
+                    .sum::<f64>()
+                    .round() as i64
+            });
+            LOCAL.with(|l| l.borrow_mut().push((frame, turned)));
+        }
+        LASER.with(|l| {
+            let c = &reserve_state.combat;
+            l.borrow_mut().push((frame, c.refire, c.heat, c.energy));
+        });
     }
     assert_eq!(
         (nav.random.a, nav.random.b),
@@ -409,7 +486,7 @@ fn port_takeoff_replays_the_original_frame_by_frame() {
         // The climb integrates in the planet's rotating frame as the original
         // does (F601's per-axis floor rounding depends on the axes' signs), so
         // its velocity is the original's to within the frame turn's rounding.
-        if theirs.mode != 0 && *frame > LAUNCH_FRAME {
+        if theirs.mode != 0 && theirs.mode != 0x2c && *frame > LAUNCH_FRAME {
             for axis in 0..3 {
                 assert!(
                     (ours.velocity[axis] - theirs.velocity[axis]).abs() <= 3,
@@ -456,6 +533,150 @@ fn port_takeoff_replays_the_original_frame_by_frame() {
     // F1520 on the ship's rows once cut the thrust 1.5% from the clear on and
     // left the port 1.25% slow.
     assert!(worst_speed < 0.005, "speed {:.2}% off", worst_speed * 100.0);
+}
+
+/// The long climb and fall (PAR-05): `jjffe-smoke --flight takeoff 4000` holds the
+/// faster key for the whole flight. The original never leaves the planet's frame
+/// (its parent stays the planet for all 3,119 frames), the ship climbs to about 6,700
+/// km, turns back under the planet's pull and strikes the ground at frame 3120
+/// (mode 0x2c). The replay must keep the modes and the set speed exactly, and the
+/// speed within 1% on every frame to 2800. Past that the port's fall is steeper
+/// (docs/ACCEPTED_PARITY.md): it reaches the ground about 25 frames early.
+/// Run with `FFE_WORLD_CACHE` and `FFE_LONG_TRACE`.
+#[test]
+#[ignore = "Local-only: needs FFE_WORLD_CACHE and FFE_LONG_TRACE"]
+fn port_long_flight_follows_the_original_to_the_descent() {
+    const LAST: u64 = 2800;
+    let reference = trace("FFE_LONG_TRACE");
+    assert!(
+        reference
+            .iter()
+            .any(|row| row.frame == 3120 && row.mode == 0x2c),
+        "the original strikes the ground at frame 3120"
+    );
+    // The player's parent body (`planet.index`) is the same on every row after the
+    // launch: the original's frame selector never switches in this flight.
+    let parents: std::collections::BTreeSet<u64> =
+        std::fs::read_to_string(std::env::var_os("FFE_LONG_TRACE").unwrap())
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("{\"scenario\""))
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["frame"].as_u64().unwrap() > LAUNCH_FRAME)
+            .map(|row| row["planet"]["index"].as_u64().unwrap())
+            .collect();
+    assert_eq!(
+        parents.len(),
+        1,
+        "the original left the planet's frame: {parents:?}"
+    );
+    let port = replay(LAST);
+    let length = |v: [i64; 3]| v.iter().map(|c| (*c as f64).powi(2)).sum::<f64>().sqrt();
+    let (mut worst, mut worst_frame, mut compared) = (0.0f64, 0, 0);
+    for (frame, ours) in &port {
+        let Some(row) = reference.iter().find(|row| row.frame == *frame) else {
+            continue;
+        };
+        assert_eq!(ours.set_speed, row.set_speed, "set speed at frame {frame}");
+        compared += 1;
+        let speed = length(row.velocity);
+        if speed > 500.0 {
+            let error = (length(ours.velocity) - speed).abs() / speed;
+            if error > worst {
+                (worst, worst_frame) = (error, *frame);
+            }
+        }
+    }
+    eprintln!(
+        "{compared} frames compared; worst speed difference {:.2}% (frame {worst_frame})",
+        worst * 100.0
+    );
+    assert!(compared > 2600);
+    assert!(
+        worst < 0.01,
+        "speed {:.2}% off at frame {worst_frame}",
+        worst * 100.0
+    );
+}
+
+/// PAR-11: the autopilot's whole descent to a planet's starport. `jjffe-smoke
+/// --start-key=0x02 --flight paddock 20000` (with `FFE_ROWS_DUMP=1`, stderr) launches
+/// from Ross 154's pad, holds Return for frames 260 to 299, and at the end of frame 770
+/// targets the starport and engages F1020; the original flies mode 2 to its pad
+/// (frame 15,704). The replay does the same from the same keys, with
+/// `FFE_AUTOPILOT_AT=770`, and runs F741..F746 on F152's events, then compares the
+/// ship's place relative to the planet, in the planet's rotating frame, on every frame.
+/// Run with `FFE_WORLD_CACHE`, `FFE_PAD_POSES` (that stderr) and `FFE_AUTOPILOT_AT`.
+#[test]
+#[ignore = "Local-only: needs FFE_WORLD_CACHE, FFE_PAD_POSES and FFE_AUTOPILOT_AT"]
+fn port_autopilot_flies_the_descent_to_a_pad() {
+    #[derive(Deserialize)]
+    struct Pose {
+        rows: u64,
+        mode: u8,
+        pos: [i64; 3],
+    }
+    let poses: Vec<Pose> = std::fs::read_to_string(std::env::var_os("FFE_PAD_POSES").unwrap())
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("{\"rows\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let engaged = poses
+        .iter()
+        .find(|p| p.mode == 2)
+        .expect("the original engages the autopilot");
+    let landed = poses
+        .iter()
+        .find(|p| p.rows > engaged.rows && p.mode == 0x30)
+        .expect("the original lands");
+    LOCAL.with(|l| l.borrow_mut().clear());
+    replay_with(landed.rows, pad_burst_keys, None);
+    let ours = LOCAL.with(|l| l.borrow().clone());
+    let verbose = std::env::var_os("FFE_TAKEOFF_VERBOSE").is_some();
+    let length = |v: [i64; 3]| v.iter().map(|c| (*c as f64).powi(2)).sum::<f64>().sqrt();
+    // The descent is about 8 km (the launch climbs to 257,000 altitude units).
+    const LEG: f64 = 8_000_000.0;
+    let (mut worst, mut worst_late, mut worst_frame, mut compared) = (0.0f64, 0.0f64, 0, 0);
+    for (frame, at) in &ours {
+        let Some(pose) = poses.iter().find(|p| p.rows == *frame && p.mode == 2) else {
+            continue;
+        };
+        let error = length(std::array::from_fn(|k| at[k] - pose.pos[k])) / LEG;
+        compared += 1;
+        if verbose && frame % 250 == 0 {
+            eprintln!(
+                "frame {frame}: original {:?}, port {at:?}, error {:.2}%",
+                pose.pos,
+                error * 100.0
+            );
+        }
+        if error > worst {
+            (worst, worst_frame) = (error, *frame);
+        }
+        if *frame > engaged.rows + 800 {
+            worst_late = worst_late.max(error);
+        }
+    }
+    eprintln!(
+        "{compared} frames compared, the port flew to frame {}; worst error {:.2}% of the 8 km descent (frame {worst_frame}), {:.2}% after the first 800 frames",
+        ours.last().map_or(0, |o| o.0),
+        worst * 100.0,
+        worst_late * 100.0
+    );
+    assert!(compared > 14_000, "the port's autopilot ended early");
+    // The first seconds after the engage are 5% off (frame 914, the guidance's first
+    // events); after the first 800 frames the port stays within 1.2% of it (50 to 65 m) to the pad.
+    assert!(
+        worst < 0.06,
+        "the descent differs from the original: {:.2}%",
+        worst * 100.0
+    );
+    assert!(
+        worst_late < 0.02,
+        "the late descent differs from the original: {:.2}%",
+        worst_late * 100.0
+    );
 }
 
 /// F1037/F1121 against the executed original's `--flight keyboard 900`: the
@@ -580,8 +801,14 @@ fn port_hover_follows_the_original_without_keys() {
             }
         }
     }
-    eprintln!("hover modes: original {:?}, port {:?}; worst velocity difference {worst}", changes.0, changes.1);
-    assert_eq!(changes.0, changes.1, "the hand-off to 0x26 is on the same frame");
+    eprintln!(
+        "hover modes: original {:?}, port {:?}; worst velocity difference {worst}",
+        changes.0, changes.1
+    );
+    assert_eq!(
+        changes.0, changes.1,
+        "the hand-off to 0x26 is on the same frame"
+    );
     assert!(worst <= 6, "velocity differs by {worst}");
 }
 
@@ -597,24 +824,30 @@ fn port_reserve_follows_the_original() {
         reserve: u64,
         energy: u32,
     }
-    let theirs: Vec<Reserve> = std::fs::read_to_string(std::env::var_os("FFE_RESERVE_TRACE").unwrap())
-        .unwrap()
-        .lines()
-        .filter(|line| line.starts_with("{\"reserve\""))
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let theirs: Vec<Reserve> =
+        std::fs::read_to_string(std::env::var_os("FFE_RESERVE_TRACE").unwrap())
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("{\"reserve\""))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
     let last = trace("FFE_KEYBOARD_TRACE").last().unwrap().frame;
-    let clock: Vec<KeyboardRow> = std::fs::read_to_string(std::env::var_os("FFE_KEYBOARD_TRACE").unwrap())
-        .unwrap()
-        .lines()
-        .filter(|line| line.starts_with("{\"keyboard\""))
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let clock: Vec<KeyboardRow> =
+        std::fs::read_to_string(std::env::var_os("FFE_KEYBOARD_TRACE").unwrap())
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("{\"keyboard\""))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
     let first = clock
         .iter()
         .find(|row| row.keyboard == LAUNCH_FRAME + 1)
         .expect("keyboard row for the launch frame");
-    let (_, ours) = replay_with(last, keyboard_keys, Some((first.timer_last, first.timer_next)));
+    let (_, ours) = replay_with(
+        last,
+        keyboard_keys,
+        Some((first.timer_last, first.timer_next)),
+    );
     let mut worst = 0i64;
     for (frame, energy) in &ours {
         let Some(row) = theirs.iter().find(|row| row.reserve == *frame) else {
@@ -622,7 +855,10 @@ fn port_reserve_follows_the_original() {
         };
         let difference = i64::from(*energy) - i64::from(row.energy);
         if std::env::var_os("FFE_TAKEOFF_VERBOSE").is_some() && difference != 0 {
-            eprintln!("frame {frame}: original {} port {energy} ({difference})", row.energy);
+            eprintln!(
+                "frame {frame}: original {} port {energy} ({difference})",
+                row.energy
+            );
         }
         worst = worst.max(difference.abs());
     }
@@ -631,6 +867,80 @@ fn port_reserve_follows_the_original() {
     // after that the thrust words differ by a few units (the velocity's rounding),
     // which moves the spend by at most 6 (Hope's start: 12) of about 5,600 units.
     assert!(worst <= 12, "reserve differs by {worst}");
+}
+
+/// Firing under the reserve's events (PAR-01): `FFE_FIRE_FROM=280 FFE_RESERVE_DUMP=1
+/// jjffe-smoke --flight keyboard 900` calls the real F931 on the front mount at the
+/// end of every frame from 280 on; the replay fires the same way. The laser's refire
+/// countdown and heat (cooled by F938's events) must match every frame, and the
+/// reserve (the shots' energy and the thrust spend) as in the unfired replay.
+/// Run with `FFE_WORLD_CACHE`, `FFE_FIRE_TRACE` (stderr), `FFE_KEYBOARD_TRACE`
+/// (stdout) and `FFE_FIRE_FROM`.
+#[test]
+#[ignore = "Local-only: needs FFE_WORLD_CACHE, FFE_FIRE_TRACE, FFE_KEYBOARD_TRACE and FFE_FIRE_FROM"]
+fn port_firing_follows_the_original() {
+    #[derive(Deserialize)]
+    struct Laser {
+        reserve: u64,
+        refire: u16,
+        laser_heat: u16,
+        energy: u32,
+    }
+    let theirs: Vec<Laser> = std::fs::read_to_string(std::env::var_os("FFE_FIRE_TRACE").unwrap())
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("{\"reserve\""))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let last = trace("FFE_KEYBOARD_TRACE").last().unwrap().frame;
+    let clock: Vec<KeyboardRow> =
+        std::fs::read_to_string(std::env::var_os("FFE_KEYBOARD_TRACE").unwrap())
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("{\"keyboard\""))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    let first = clock
+        .iter()
+        .find(|row| row.keyboard == LAUNCH_FRAME + 1)
+        .expect("keyboard row for the launch frame");
+    LASER.with(|l| l.borrow_mut().clear());
+    replay_with(
+        last,
+        keyboard_keys,
+        Some((first.timer_last, first.timer_next)),
+    );
+    let ours = LASER.with(|l| l.borrow().clone());
+    let (mut worst_energy, mut shots, mut compared) = (0i64, 0, 0);
+    let mut previous = u16::MAX;
+    for (frame, refire, heat, energy) in &ours {
+        let Some(row) = theirs.iter().find(|row| row.reserve == *frame) else {
+            continue;
+        };
+        compared += 1;
+        assert_eq!(*refire, row.refire, "refire at frame {frame}");
+        assert_eq!(*heat, row.laser_heat, "laser heat at frame {frame}");
+        let difference = (i64::from(*energy) - i64::from(row.energy)).abs();
+        if std::env::var_os("FFE_TAKEOFF_VERBOSE").is_some() && difference > 6 {
+            eprintln!(
+                "frame {frame}: original {} port {energy} ({difference})",
+                row.energy
+            );
+        }
+        worst_energy = worst_energy.max(difference);
+        if *refire > previous {
+            shots += 1;
+        }
+        previous = *refire;
+    }
+    eprintln!(
+        "{compared} frames compared, {shots} shots, largest reserve difference {worst_energy}"
+    );
+    assert!(shots >= 15, "the scenario must fire repeatedly");
+    // Ross: within 6. Hope: one thrust event (frame 818, 51 of the 14,000 units spent) is
+    // zero in the fired original and 51 in the unfired one (the thrust word there sits
+    // on a velocity-rounding edge), and the port spends 57: 0.4% of the spend.
+    assert!(worst_energy <= 70, "reserve differs by {worst_energy}");
 }
 
 /// The original at an uneven frame rate (PAR-12): `FFE_CLOCK_SKIP=21 jjffe-smoke

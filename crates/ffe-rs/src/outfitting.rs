@@ -496,6 +496,33 @@ mod tests {
     }
 
     #[test]
+    fn a_misjumped_integral_hull_is_stuck_with_its_class_1_drive() {
+        // F911/F948 leave class 1 on any hull, but F411 refuses to remove the
+        // drive of a hull whose statistics word is negative (a Turner Class: word
+        // 0x800d), and F409 refuses a second drive, so the original offers no
+        // way to swap it (owner report, commander-07).
+        let mut loadout = Loadout {
+            drive: 1,
+            ..Loadout::default()
+        };
+        let mut combat = Combat::default();
+        combat.drive = 1;
+        let mut credits = 1_000_000;
+        let mut integral = roomy();
+        integral.drive_removable = false;
+        // Record 31 is the Interplanetary drive, 34 the Class 1 Hyperdrive.
+        assert_eq!(
+            remove(31, 0xfd, &mut loadout, &mut combat, &mut credits, integral).unwrap_err(),
+            "The drive is an integral part of your ship."
+        );
+        assert_eq!(
+            fit(34, 0xfd, &mut loadout, &mut combat, &mut credits, integral).unwrap_err(),
+            "You may have only one drive system."
+        );
+        assert_eq!((loadout.drive, combat.drive, credits), (1, 1, 1_000_000));
+    }
+
+    #[test]
     fn f410_refuses_an_integral_drive() {
         let mut loadout = Loadout::default();
         let mut combat = Combat::default();

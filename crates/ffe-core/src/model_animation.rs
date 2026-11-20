@@ -288,6 +288,11 @@ pub enum Draw {
     Dot {
         distance: u8,
         screen: Option<[i16; 2]>,
+        /// The view depth F1680 divides by (`position[2]` after its shifts).
+        depth: i32,
+        /// The descriptor's cull radius shifted by the operand scale, the dividend of
+        /// F1680's `SpecialDiv(radius, depth)`.
+        radius: i32,
     },
     /// The model runs (F1685, F1773, F1780).
     Model {
@@ -503,6 +508,8 @@ pub fn setup_object(
         return Draw::Dot {
             distance: distance as u8,
             screen,
+            depth: position[2],
+            radius,
         };
     }
     Draw::Model {

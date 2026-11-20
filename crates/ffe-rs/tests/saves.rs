@@ -160,6 +160,7 @@ fn quick_save_round_trip_rejects_a_corrupt_file_without_touching_it() {
         altitude: i32::MAX,
         docked: None,
         legal: ffe_core::npc::Legal::default(),
+        offended: None,
         ship_lock: None,
         missile_lock: None,
         missile_view: None,

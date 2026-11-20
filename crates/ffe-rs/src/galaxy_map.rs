@@ -400,16 +400,22 @@ pub fn date_text(seconds: f64) -> String {
         ("Nov", 30),
         ("Dec", 31),
     ];
-    let total = (seconds.max(0.0) as u64) + 12 * 3600;
-    let (mut days, rest) = (total / 86_400, total % 86_400);
-    let mut year = 3250u32;
+    // A time before the new game (the system map's time point can go back) counts
+    // back through the plain 365-day years.
+    let total = seconds.floor() as i64 + 12 * 3600;
+    let (mut days, rest) = (total.div_euclid(86_400), total.rem_euclid(86_400) as u64);
+    let mut year = 3250i64;
+    while days < 0 {
+        days += 365;
+        year -= 1;
+    }
     while days >= 365 {
         days -= 365;
         year += 1;
     }
     let mut month = 0;
-    while days >= u64::from(MONTHS[month].1) {
-        days -= u64::from(MONTHS[month].1);
+    while days >= i64::from(MONTHS[month].1) {
+        days -= i64::from(MONTHS[month].1);
         month += 1;
     }
     format!(

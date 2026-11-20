@@ -241,6 +241,16 @@ pub(crate) fn dot_table_layout(profile: &str) -> Option<u32> {
     }
 }
 
+/// The far-object dot tables' RVAs (v35): the first sprite record (seven 18-byte records
+/// before `DATA_007784`) and the size map (`DATA_007825`). Verified byte for byte against the
+/// floppy 1.02 executable; the others keep the same distance from the dot tables (as every
+/// table in this block does) and are checked by the decoder's validation.
+pub(crate) fn object_dot_layout(profile: &str) -> Option<(u32, u32)> {
+    let dots = dot_table_layout(profile)?;
+    // DATA_007784 sits 0x1534 bytes before DATA_007835; the size map 116 bytes.
+    Some((dots - 0x1534 - 7 * 18, dots - 116))
+}
+
 /// The star light-point tables (`DATA_007820`, `7821`, `7822`, `7828`) RVAs (v23), floppy 1.02 only.
 pub(crate) fn star_point_layout(profile: &str) -> Option<[u32; 4]> {
     match profile {
@@ -375,10 +385,19 @@ pub fn build_bytes(root: &Path) -> Result<Vec<u8>, String> {
             let slots = ffe_convert::model_extents::MODEL_COUNT;
             let mut collision_index = vec![0u8; slots * 12];
             let mut collision_data = Vec::new();
+            // Far and dot classes and colour of every descriptor, for far objects' dots (v35).
+            let mut object_models = vec![[0u8; ffe_core::model_dot::OBJECT_MODEL_BYTES]; slots];
             for index in 0..slots as u32 {
                 if let Ok(record) = decode_model_record(&bytes, model_table_rva, index) {
                     record_table[index as usize * 20..index as usize * 20 + 20]
                         .copy_from_slice(&record);
+                }
+                if let Ok(record) = ffe_convert::embedded::decode_model_object_dot(
+                    &bytes,
+                    model_table_rva,
+                    index,
+                ) {
+                    object_models[index as usize] = record;
                 }
                 // The collision stream, where the descriptor has one (v17).
                 if let Ok(Some((back, stream))) =
@@ -670,6 +689,26 @@ pub fn build_bytes(root: &Path) -> Result<Vec<u8>, String> {
                     bytes: table.bytes,
                 });
             }
+            // The tables are laid out the same relative to the dot tables in every profile, so
+            // a profile whose bytes do not validate simply has no far-object dots (v35).
+            if let Some((sprites_rva, size_map_rva)) = object_dot_layout(profile.id) {
+                if let Ok(table) = ffe_convert::embedded::decode_object_dot_tables(
+                    &bytes,
+                    sprites_rva,
+                    size_map_rva,
+                    &object_models,
+                ) {
+                    assets.push(Asset {
+                        id: "base:world/object-dots".to_owned(),
+                        path: "world/object-dots.bin".to_owned(),
+                        kind: AssetKind::ObjectDotTables {
+                            models: slots as u32,
+                            source_offset: table.source_offset as u64,
+                        },
+                        bytes: table.bytes,
+                    });
+                }
+            }
             if let Some(rvas) = star_point_layout(profile.id) {
                 let table = decode_star_point_tables(&bytes, rvas)?;
                 assets.push(Asset {
@@ -932,14 +971,25 @@ pub fn build_bytes(root: &Path) -> Result<Vec<u8>, String> {
             crate::SONGS.len()
         ));
     }
-    if geometry < 2 || assets.len() != 382 + tables + 2 * geometry + models + music_songs {
+    // The v35 far-object dot tables: required for the byte-verified floppy 1.02, optional for
+    // the profiles that share its relative layout (they are left out if they do not validate).
+    let object_dots = assets
+        .iter()
+        .filter(|asset| matches!(asset.kind, AssetKind::ObjectDotTables { .. }))
+        .count();
+    if profile.id == "ffe-floppy-1.02-en" && object_dots != 1 {
+        return Err("the floppy 1.02 far-object dot tables did not validate; no cache written".to_owned());
+    }
+    if geometry < 2
+        || assets.len() != 382 + tables + 2 * geometry + models + music_songs + object_dots
+    {
         return Err(format!(
             "unexpected imported asset count {} ({geometry} geometries, {models} command programs); no cache written",
             assets.len()
         ));
     }
     let manifest = Manifest {
-        format: "ffe-content-cache".to_owned(), format_version: 34,
+        format: "ffe-content-cache".to_owned(), format_version: 35,
         tool_version: env!("CARGO_PKG_VERSION").to_owned(), source_profile: profile.id.to_owned(),
         source_files: inspection.files.into_iter().map(|record| SourceFile {
             path: record.path, size: record.size, sha256: record.sha256,

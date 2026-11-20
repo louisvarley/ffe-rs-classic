@@ -19,6 +19,8 @@ fn record(value: &Value) -> Starport {
         bays: int(&value["bays"]) as u16,
         pads: std::array::from_fn(|i| int(&pads[i]) as u8),
         door: 0,
+        response: None,
+        heat: 0,
     }
 }
 

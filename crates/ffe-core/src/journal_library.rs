@@ -336,6 +336,16 @@ impl Library {
         self.random_words[slot]
     }
 
+    /// F76 `Zz`: clear the lazy F106 value so the next read draws again.
+    pub fn reset_random_word(&mut self, word: i32) {
+        if let Some(slot) = usize::try_from(word)
+            .ok()
+            .and_then(|word| self.random_words.get_mut(word))
+        {
+            *slot = 0;
+        }
+    }
+
     /// F95 (token 0x2e): `DATA_008568[word]` for article 0, else record
     /// slot `word` of the first record of `article` in the journal's issue,
     /// then its queue (F92 draws it on first read).
@@ -691,6 +701,18 @@ mod tests {
             globals[*global] = slot as i32;
         }
         Fixed { globals, draws: 0 }
+    }
+
+    #[test]
+    fn zz_resets_lazy_random_word_slots_with_bounds_checks() {
+        let mut library = Library::default();
+        library.random_words[1] = 17;
+        library.random_words[2] = 29;
+        library.reset_random_word(1);
+        library.reset_random_word(-1);
+        library.reset_random_word(100);
+        assert_eq!(library.random_words[1], 0);
+        assert_eq!(library.random_words[2], 29);
     }
 
     #[test]

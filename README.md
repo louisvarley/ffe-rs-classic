@@ -25,7 +25,7 @@ installed copy of the game; nothing from it is in this repository.
 | How | What it does |
 |---|---|
 | `play.bat` | Builds the release game and starts it on `.\game`. Errors stay on screen. |
-| `launcher.bat` | Builds and opens the Classic launcher: game folder, verification, start location, settings ([notes](docs/notes/launcher.md)). |
+| `launcher.bat` | Builds and opens the Classic launcher: game folder and release, game videos, start location, settings ([notes](docs/notes/launcher.md)). |
 | `target\release\ffe-rs.exe --root .` | The game directly. `--game <folder>` picks another game folder. |
 
 Every run records your keyboard and mouse to `recordings\<date-time>.ffe-input`.
@@ -49,7 +49,11 @@ synthetic prototype flight model). Other inputs used by the tests and evidence:
 ```
 ffe-rs [--game DIR] [--root DIR] [--start 0..5|sol] [--skip-intro] [--load SAVE.json]
        [--smoke-frames N] [--capture* DIR] [--record FILE] [--replay FILE [--replay-exit]]
+ffe-rs --help | --version            (answered without game files; --version is the build ID)
 ```
+
+`tools\package.ps1` stages a playtest zip (executables and documents only, never game data).
+`tools\clean-machine-check.ps1` checks the import from a fresh folder; `python tools/third-party.py` lists the linked crates' licences (`docs/THIRD_PARTY.md`).
 
 `ffe-tools` inspects and converts a game installation without changing it:
 

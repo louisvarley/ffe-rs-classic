@@ -59,7 +59,10 @@ fn the_launch_stages_follow_the_original_frame_by_frame() {
     }
     // The port's stage state after each frame's F1088-style tick; the frame of
     // the launch request itself is LAUNCH_FRAME (the row there already shows 0x1a).
-    let mut changes_ours = vec![(nav.sequence.expect("launch begun").stages.state, LAUNCH_FRAME)];
+    let mut changes_ours = vec![(
+        nav.sequence.expect("launch begun").stages.state,
+        LAUNCH_FRAME,
+    )];
     let mut released = None;
     for frame in LAUNCH_FRAME + 1..=theirs.last().unwrap().0 {
         let events = nav.tick_traffic(FRAME_TICS, FRAME_SECONDS);
@@ -149,12 +152,14 @@ fn the_exit_flight_follows_the_original_frame_by_frame() {
     let tools = cache
         .asset("base:terrain/tables")
         .zip(cache.asset("base:terrain/maps"))
-        .map(|(terrain_table, terrain_maps)| ffe_core::surface::SurfaceTools {
-            shapes: &library,
-            terrain_table,
-            terrain_maps,
-            detail: 0,
-        });
+        .map(
+            |(terrain_table, terrain_maps)| ffe_core::surface::SurfaceTools {
+                shapes: &library,
+                terrain_table,
+                terrain_maps,
+                detail: 0,
+            },
+        );
     let mut model = OriginalFlight::from_flight(&state, Some(&stats));
     model.set_collision_radius(info.radii().1);
     model.teleport(nav.launch_seat(index).unwrap());
@@ -186,11 +191,17 @@ fn the_exit_flight_follows_the_original_frame_by_frame() {
         if std::env::var_os("FFE_TAKEOFF_VERBOSE").is_some() {
             eprintln!(
                 "frame {}: original z {} v {:?}; port z {:.0} v {:.0?}; thrust {:?} limits {:?}",
-                pose.rows, pose.pos[2], pose.v, ours[2], velocity,
-                model.thrust_words(), model.player().limits
+                pose.rows,
+                pose.pos[2],
+                pose.v,
+                ours[2],
+                velocity,
+                model.thrust_words(),
+                model.player().limits
             );
         }
-        let along = (ours[2] - pose.pos[2] as f64).abs() / (pose.pos[2] as f64 - 65_536.0).max(1_000.0);
+        let along =
+            (ours[2] - pose.pos[2] as f64).abs() / (pose.pos[2] as f64 - 65_536.0).max(1_000.0);
         let speed = (velocity[2] - f64::from(pose.v[2])).abs() / f64::from(pose.v[2]).max(100.0);
         worst = (worst.0.max(along), worst.1.max(speed));
     }
@@ -218,7 +229,11 @@ fn the_docking_stages_follow_the_original_frame_by_frame() {
         .filter(|line| line.starts_with("{\"scenario\""))
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    let touch = rows.iter().find(|row| row.mode == 0xa).expect("the original docks").frame;
+    let touch = rows
+        .iter()
+        .find(|row| row.mode == 0xa)
+        .expect("the original docks")
+        .frame;
     let mut theirs: Vec<(u8, u64)> = Vec::new();
     for row in rows.iter().filter(|row| row.frame >= touch) {
         if theirs.last().map(|c| c.0) != Some(row.mode) {
@@ -297,12 +312,14 @@ fn the_autopilot_approach_follows_the_original_frame_by_frame() {
     let tools = cache
         .asset("base:terrain/tables")
         .zip(cache.asset("base:terrain/maps"))
-        .map(|(terrain_table, terrain_maps)| ffe_core::surface::SurfaceTools {
-            shapes: &library,
-            terrain_table,
-            terrain_maps,
-            detail: 0,
-        });
+        .map(
+            |(terrain_table, terrain_maps)| ffe_core::surface::SurfaceTools {
+                shapes: &library,
+                terrain_table,
+                terrain_maps,
+                detail: 0,
+            },
+        );
     let mut model = OriginalFlight::from_flight(&state, Some(&stats));
     model.set_collision_radius(info.radii().1);
     let axis = station.orientation[2];
@@ -380,7 +397,11 @@ fn the_autopilot_approach_follows_the_original_frame_by_frame() {
         );
         assert!(result.is_ok(), "frame {}: {result:?}", pose.rows);
     }
-    eprintln!("approach: worst error {:.3}% of the 4.1 km leg over {} frames", worst * 100.0, poses.len());
+    eprintln!(
+        "approach: worst error {:.3}% of the 4.1 km leg over {} frames",
+        worst * 100.0,
+        poses.len()
+    );
     assert!(ended.is_none(), "the port's autopilot ended at {ended:?}");
     assert!(worst < 0.005, "the approach differs from the original");
 }

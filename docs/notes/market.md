@@ -144,6 +144,7 @@ at the first visit: water 0.9, grain 38.0, precious metals 1735.6, gem stones 30
   count, tonnage) because the port has no single global F1530 stream. Prices, stock and drift are
   unaffected.
 - **Mission cargo and F641's special-offer commodity** are not carried; the five mission item names
-  are parsed but not traded.
-- **The equipment that lowers the hold** (F911 and the new-game set-up) is still not modelled beyond
-  F998's fixed starting allowance.
+  are imported but not traded. This runtime behavior remains under the existing gameplay items.
+- **Equipment-adjusted hold capacity is implemented**: F390/F391 mass is applied relative to the
+  delivered loadout in `trade::capacity`; `tests/fitting.rs` covers fitted and removed equipment.
+  F998's new-game 7 t allowance remains the source start value.

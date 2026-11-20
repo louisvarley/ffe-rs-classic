@@ -32,6 +32,91 @@ fn changed(before: &[u32], after: &[u32]) -> usize {
     before.iter().zip(after).filter(|(a, b)| a != b).count()
 }
 
+#[test]
+#[ignore = "Local-only flight background render; needs FFE_WORLD_CACHE"]
+fn flight_background_model315_reaches_frame() {
+    use ffe_rs::camera::Camera;
+    use ffe_rs::model_viewer::Shape;
+    let cache = cache();
+    let viewer = ModelViewer::new(&cache).unwrap();
+    let nav = Navigator::new_game(&cache, 0).unwrap();
+    let body = nav
+        .bodies
+        .iter()
+        .find(|body| body.kind == ffe_rs::navigation::Kind::Star)
+        .expect("the start system has a star");
+    let unit = ffe_rs::original_flight::UNITS_PER_FLIGHT_UNIT;
+    let mut screen = Screen::new(&cache).unwrap();
+    screen.discs = vec![ffe_rs::screen::Disc {
+        system_type: Some(body.system_type),
+        centre: body.position.map(|value| value as f64 / unit),
+        radius: body.radius as f64 / unit,
+        light: [0.0, 0.0, 1.0],
+        colours: (17, 17),
+        star: true,
+        temperature: u16::try_from(body.temperature).ok(),
+        model: Some((body.model, body.seed)),
+        orientation: body.orientation,
+    }];
+    let mut state = Flight {
+        mode: Mode::Flight,
+        position: [0.0; 3],
+        velocity: [0.0, 0.0, 100.0],
+        system_flight: true,
+        ship: NEW_GAME_SHIP,
+        ..Flight::default()
+    };
+    let mut start_axes = nav.bodies[nav.docked.unwrap()].orientation;
+    start_axes[0] = start_axes[0].map(|value| -value);
+    start_axes[2] = start_axes[2].map(|value| -value);
+    state.axes = Some(start_axes);
+    let views = ViewState::default();
+    let scale = ffe_rs::screen::model_scale(&viewer).unwrap();
+    let camera = Camera::new(&state, &views, None, scale);
+    let rows = body.orientation.map(|axis| camera.direction(axis));
+    let origin = camera
+        .direction(camera.axes[2])
+        .map(|component| component * 0x2000 as f64);
+    let mut inputs = AnimationInputs::original(0, 0, &viewer.shades());
+    inputs.depth_detail = true;
+    let frame = viewer
+        .render_scene_with(0x13b, rows, origin, viewer.light_direction(), &inputs)
+        .unwrap();
+    assert!(frame.shapes.iter().any(|shape| matches!(
+        shape,
+        Shape::Textured(t) if matches!(t.bitmap & 0xfff, 53..=58)
+    )));
+    assert!(frame.shapes.iter().any(|shape| matches!(
+        shape,
+        Shape::Spans(spans, _) if !spans.is_empty()
+    )));
+
+    screen.draw(&state, views, Some(&viewer), true, "");
+    let with_background = screen.logical_pixels().to_vec();
+    save(&screen, "flight-background-source-transform.ppm");
+
+    screen.stars_visible = false;
+    screen.draw(&state, ViewState::default(), Some(&viewer), true, "");
+    let without_background = screen.logical_pixels();
+    assert!(
+        changed(&with_background, without_background) > 0,
+        "F1775's model 315 background did not reach the flight frame"
+    );
+
+    // The Graphic Detail page's "Black" leaves the stars drawn over the black sky.
+    screen.sky = ffe_rs::prefs::space_colour_rgb(0);
+    screen.stars_visible = true;
+    screen.draw(&state, ViewState::default(), Some(&viewer), true, "");
+    let black_with = screen.logical_pixels().to_vec();
+    save(&screen, "flight-background-black-sky.ppm");
+    screen.stars_visible = false;
+    screen.draw(&state, ViewState::default(), Some(&viewer), true, "");
+    let view = 320 * 158;
+    let stars = changed(&black_with[..view], &screen.logical_pixels()[..view]);
+    eprintln!("black sky: {stars} star pixels");
+    assert!(stars > 0, "the stars are not drawn over black space");
+}
+
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
@@ -694,4 +779,126 @@ fn hyperspace_clouds_draw_and_expire() {
         }
         assert_eq!(cloud.alive(), name == "departure", "{name} cloud lifetime");
     }
+}
+
+/// F1751 adds the detail words `DATA_008812/8813` to the cloud's scale before comparing its
+/// tiers with the view depth. The executed original reads `1, 1` (the default High radio), not
+/// the `0, 0` the viewer assumed, so a mid-depth cloud draws more dots than at `0, 0`; at
+/// `-1, -2` (Low) it never draws more.
+#[test]
+#[ignore = "Local-only: needs the content cache (FFE_WORLD_CACHE)"]
+fn dust_detail_follows_the_shape_detail_words() {
+    let cache = cache();
+    let viewer = ModelViewer::new(&cache).unwrap();
+    let scale = viewer.find(ffe_core::dust::MODEL).unwrap().scale;
+    let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let dots = |z: f64, detail: [i32; 2]| {
+        let mut inputs = AnimationInputs::original(0, 0, &viewer.shades());
+        inputs.depth_detail = true;
+        inputs.detail = detail;
+        viewer
+            .render_scene_with_scale(
+                ffe_core::dust::MODEL,
+                Some(scale),
+                identity,
+                [0.0, 0.0, z],
+                [0.0, 0.0, 1.0],
+                &inputs,
+            )
+            .unwrap()
+            .shapes
+            .len()
+    };
+    let (mut more, mut fewer) = (0, 0);
+    for step in 0..30 {
+        let z = 1.0e6 * 1.25f64.powi(step);
+        let (low, medium, high) = (dots(z, [-1, -2]), dots(z, [0, 0]), dots(z, [1, 1]));
+        more += usize::from(high > medium);
+        fewer += usize::from(high < medium || medium < low);
+    }
+    assert!(more > 0, "High never drew more dots than Medium");
+    assert_eq!(fewer, 0, "a higher detail level drew fewer dots");
+}
+
+/// A fast ship's clouds are big: F1035's `+0x7e` word includes F1099's speed class
+/// (`DATA_008865`), so at 9,994 km/s each cloud is thousands of kilometres across against a
+/// lead of 13,000 km, and the dust fills the view instead of bunching round the line of flight.
+/// Measured in the executed original at that speed: 45 clouds, dots on every part of the
+/// screen, about one in five a "+" (a size-2 particle). Local-only: needs the cache.
+#[test]
+#[ignore = "Local-only: needs the content cache (FFE_WORLD_CACHE)"]
+fn dust_fills_the_view_at_ten_thousand_kilometres_a_second() {
+    let cache = cache();
+    let viewer = ModelViewer::new(&cache).unwrap();
+    let sine = ffe_core::model_math::SineTable::from_bytes(cache.asset("base:math/sine").unwrap())
+        .unwrap();
+    let unit = ffe_rs::original_flight::UNITS_PER_FLIGHT_UNIT;
+    let speed_mm = 9_994.0e6;
+    let velocity = (speed_mm / ffe_rs::original_flight::MM_PER_SECOND) as i64;
+    let mut nav = Navigator::new_game(&cache, 1).unwrap();
+    let mut screen = Screen::new(&cache).unwrap();
+    let mut position = [7.0e15f64, 3.0e15, 1.0e15];
+    for _ in 0..300 {
+        position[2] += speed_mm * 0.02;
+        nav.tick_dust(
+            0.02,
+            &ffe_core::dust::Spawn::deep_space(position.map(|v| v as i64), [0, 0, velocity], true),
+        );
+    }
+    assert!(
+        nav.dust.particles().len() > 20,
+        "only {} clouds alive",
+        nav.dust.particles().len()
+    );
+    let state = Flight {
+        mode: Mode::Flight,
+        position: position.map(|v| v / unit),
+        system_flight: true,
+        ship: NEW_GAME_SHIP,
+        axes: Some([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        ..Flight::default()
+    };
+    let views = ViewState::default();
+    screen.draw(&state, views, Some(&viewer), true, "");
+    let empty = screen.logical_pixels().to_vec();
+    screen.effects = nav
+        .dust
+        .particles()
+        .iter()
+        .map(|particle| {
+            let rows = particle.orientation(&sine);
+            ffe_rs::screen::SystemEffect {
+                model: particle.model,
+                centre: particle.position.map(|v| v as f64 / unit),
+                axes: std::array::from_fn(|r| {
+                    std::array::from_fn(|c| f64::from(rows[3 * r + c]) / 2_147_483_648.0)
+                }),
+                timer: 0,
+                size: 0,
+                scale: viewer
+                    .find(particle.model)
+                    .map(|model| (model.scale as i32 + particle.distance_bias).max(0) as u32),
+            }
+        })
+        .collect();
+    screen.draw(&state, views, Some(&viewer), true, "");
+    save(&screen, "effects-dust-fast.ppm");
+    let after = screen.logical_pixels().to_vec();
+    let lit: Vec<usize> = (0..empty.len())
+        .filter(|i| empty[*i] != after[*i])
+        .collect();
+    assert!(lit.len() > 60, "only {} dust pixels", lit.len());
+    // Outside the middle fifth of the width and third of the height.
+    let outside = lit
+        .iter()
+        .filter(|i| {
+            let (x, y) = (*i % 320, *i / 320);
+            !((128..192).contains(&x) && (53..105).contains(&y))
+        })
+        .count();
+    assert!(
+        outside * 10 > lit.len() * 8,
+        "dust bunches at the centre: {outside} of {} pixels are outside it",
+        lit.len()
+    );
 }

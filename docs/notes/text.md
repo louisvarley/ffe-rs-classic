@@ -4,9 +4,9 @@ Status (2026-10-23): **ported**. Labels (opcode 18) draw in the original font;
 3D text (opcode 10) runs each character's glyph program through the executor in
 a frame at the text's position, following the original F1747. The string table
 is imported in full (cache v13) and the per-character glyph programs in cache
-v14. What remains is listed under "Not done" (control codes, `0x3022`'s wrap,
-`0x9c0x`, depth interleaving, glyph lighting, and a reference oracle for text
-pixels/queue order).
+v14. F1398 wrapping for `0x3022` and control-code line anchors are implemented.
+What remains is listed under "Not done" (`0x9c0x`, depth interleaving, glyph
+lighting, and a reference oracle for text pixels/queue order).
 
 Rust: `ffe_rs::model_viewer::Shape::Label` (F1812: the string at the projected
 screen point, colour 15, clipped, unshadowed), `ModelViewer::model_strings`
@@ -60,8 +60,9 @@ Decoding every cached model (`text_census`):
 object + 0x124`**. So `0x3016` and `0x3022` both expand the object's own string
 (the ship's registration/name) — no uninitialised field is involved, and no
 other game state is read for the codes the models actually use. `0x3022` adds
-F1398's word wrap, which needs the 256-byte character-width table
-`DATA_007648` (not yet imported).
+F1398's word wrap. The 256-byte `DATA_007648` table is imported as
+`base:text/char-widths` (cache v27), and `ModelViewer` now wraps `0x3022` with
+F1398's width `0x23`.
 
 ## F1747's glyph placement (ported)
 
@@ -130,11 +131,9 @@ Station 453's five labels and ship 66's one label resolve with cache v13.
 
 ## Not done
 
-- **Control codes below 0x20** (the font's `+0x3c` component anchors): a string
-  containing one stops there and the record is counted in `Frame::skipped`.
-  This affects the multi-line logo/station strings, not the ship registrations.
-- **`0x3022`'s wrap.** It is expanded unwrapped: F1398 needs the 256-byte
-  character-width table `DATA_007648`, which is not imported.
+- **Control codes below 0x20** now move the pen through the font's imported
+  `newline_vertex` (cache v24); the focused synthetic regression is
+  `text_control_codes_move_to_the_font_newline_anchor`.
 - **`0x9c00`–`0x9c03`**: `DATA_005104` string table (planet/system names) and its
   FF80 handler (index 14).
 - **Depth interleaving.** The original queues glyph geometry into the same depth

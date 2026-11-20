@@ -32,7 +32,9 @@ pub fn credits(value: i32) -> String {
 pub fn capacity(nav: &Navigator, cache: &VerifiedCache, state: &Flight) -> i32 {
     let base = nav.hold(cache, state.ship);
     let delivered = if let Some(start) = nav.new_game.filter(|state| !state.bought) {
-        crate::boot::StartSpec::get(start.start_type).expect("validated source start").loadout()
+        crate::boot::StartSpec::get(start.start_type)
+            .expect("validated source start")
+            .loadout()
     } else {
         // A bought hull's integral drive is already out of the cargo statistic;
         // a removable one is charged to the hold like any fitted drive.

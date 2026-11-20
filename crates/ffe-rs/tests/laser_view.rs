@@ -199,8 +199,8 @@ fn a_60hz_pulse_sequence_aims_fires_and_damages_an_npc() {
 
         ships(&mut screen, &nav);
         target_readout(&mut screen, &nav);
-        // F1776's model 0x9c is at the gun behind the front eye: the front frame
-        // must be the same with or without it (the original's near-plane cull).
+        // The Eagle's muzzle origin is behind the eye, but F1776 still submits
+        // the forward beam model into the front camera.
         screen.beam = Some(beam);
         screen.draw(&state, views, Some(&viewer), true, "");
         save(&screen, &format!("laser-shot-{}.ppm", shot_frames.len()));
@@ -225,8 +225,7 @@ fn a_60hz_pulse_sequence_aims_fires_and_damages_an_npc() {
             laser::Damage::Hull
         ]
     );
-    // Cockpit shots must provide visible firing feedback.
-    assert!(ray_changed > 0, "the front view did not draw a ray");
+    assert!(ray_changed > 0, "the Eagle's front-view laser was hidden");
     let ship = nav.ships.iter().find(|ship| ship.id == id).unwrap();
     assert_eq!(ship.damage.shields, 0);
     assert_eq!(ship.damage.hull, 50);

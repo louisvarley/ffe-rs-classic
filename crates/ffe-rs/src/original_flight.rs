@@ -54,6 +54,58 @@ pub struct Keys {
     pub scancodes: ffe_core::keyboard::ScanSet,
 }
 
+/// The integer words of the free-flight model that the floating-point
+/// [`Flight`] view cannot carry (PAR-18): everything the next frame reads that
+/// is not rebuilt from the saved position, velocity and rows. Kept with the
+/// save so a resume continues exactly where an uninterrupted flight would be.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResumeState {
+    pub motion: Motion,
+    pub mode: u8,
+    pub flags: u8,
+    pub altitude: i32,
+    pub reference_counter: i8,
+    pub combat: bool,
+    pub combat_velocity: [i32; 3],
+    pub scanner: ffe_core::physics::Scanner,
+    pub mouse_previous: u32,
+    pub view: u8,
+    pub turret: [i16; 2],
+    pub gravity_vector: [i32; 3],
+    pub contact_flags: u8,
+    pub gear_down: bool,
+    pub gear_word: u16,
+    pub speed_word: u32,
+    pub collision_radius: i64,
+}
+
+impl ResumeState {
+    /// The `Flight` values `OriginalFlight::apply` derives from these words.
+    fn view_of(&self) -> ([f64; 3], [f64; 3], [[f64; 3]; 3]) {
+        let motion = &self.motion;
+        (
+            motion.position.map(|p| p as f64 / UNITS_PER_FLIGHT_UNIT),
+            motion
+                .velocity
+                .map(|v| f64::from(v) * MM_PER_SECOND / UNITS_PER_FLIGHT_UNIT),
+            motion
+                .orientation
+                .map(|row| row.map(|v| f64::from(v) / 2_147_483_648.0)),
+        )
+    }
+
+    /// Whether `flight` is still what these words produced: the same ship, and
+    /// the position, velocity and rows unchanged since `apply` wrote them.
+    fn matches(&self, flight: &Flight) -> bool {
+        let (position, velocity, axes) = self.view_of();
+        self.motion.model == flight.ship
+            && flight.position == position
+            && flight.velocity == velocity
+            && flight.axes == Some(axes)
+            && flight.set_speed.is_some()
+    }
+}
+
 /// A ship's position, velocity and rows (`player.motion`'s three frame-dependent
 /// fields).
 type PadState = ([i64; 3], [i32; 3], [[i32; 3]; 3]);
@@ -168,7 +220,11 @@ impl OriginalFlight {
             hold,
             credits: u32::try_from(start.cash).map_err(|_| "Invalid starting cash.")?,
             ship: start.ship,
-            mode: if spec.mode == 0x2a { crate::flight::Mode::Docked } else { crate::flight::Mode::Flight },
+            mode: if spec.mode == 0x2a {
+                crate::flight::Mode::Docked
+            } else {
+                crate::flight::Mode::Flight
+            },
             system_flight: true,
             position: start.seat.map(|v| v as f64 / UNITS_PER_FLIGHT_UNIT),
             velocity: [0.0; 3],
@@ -189,13 +245,13 @@ impl OriginalFlight {
         let mut model = Self::from_flight(&state, Some(&stats));
         model.set_mode(start.player_state);
         if spec.mode != 0x2a {
-        model.begin_pad_takeoff(
-            &crate::navigation::landing_body(planet, &planet_info),
-            planet.position,
-            &crate::navigation::landing_body(station, &port_info),
-            station.position,
-            &ship_info,
-        );
+            model.begin_pad_takeoff(
+                &crate::navigation::landing_body(planet, &planet_info),
+                planet.position,
+                &crate::navigation::landing_body(station, &port_info),
+                station.position,
+                &ship_info,
+            );
         }
         model.apply(&mut state);
         Ok((state, model))
@@ -238,7 +294,7 @@ impl OriginalFlight {
             ..Player::default()
         };
         player.scanner.player = 0;
-        Self {
+        let mut flown = Self {
             player,
             keyboard: Keyboard::new(),
             steering: Keyboard::new(),
@@ -258,7 +314,59 @@ impl OriginalFlight {
                 0xaa5.. => 1,
                 _ => 0,
             },
+        };
+        if let Some(resume) = flight.resume.as_ref().filter(|r| r.matches(flight)) {
+            flown.restore(resume, stats);
         }
+        flown
+    }
+
+    /// The integer words a resume continues from (see [`ResumeState`]).
+    pub fn resume_state(&self) -> ResumeState {
+        let player = &self.player;
+        ResumeState {
+            motion: player.motion,
+            mode: player.mode,
+            flags: player.flags,
+            altitude: player.altitude,
+            reference_counter: player.reference_counter,
+            combat: player.combat,
+            combat_velocity: player.combat_velocity,
+            scanner: player.scanner,
+            mouse_previous: player.mouse_previous,
+            view: player.view,
+            turret: player.turret,
+            gravity_vector: player.gravity_vector,
+            contact_flags: player.contact_flags,
+            gear_down: self.gear_down,
+            gear_word: self.gear_word,
+            speed_word: self.speed_word,
+            collision_radius: self.collision_radius,
+        }
+    }
+
+    fn restore(&mut self, resume: &ResumeState, stats: Option<&ShipStats>) {
+        let player = &mut self.player;
+        player.motion = resume.motion;
+        if let Some(stats) = stats {
+            player.motion.gun_mounts = stats.gun_mounts;
+        }
+        player.mode = resume.mode;
+        player.flags = resume.flags;
+        player.altitude = resume.altitude;
+        player.reference_counter = resume.reference_counter;
+        player.combat = resume.combat;
+        player.combat_velocity = resume.combat_velocity;
+        player.scanner = resume.scanner;
+        player.mouse_previous = resume.mouse_previous;
+        player.view = resume.view;
+        player.turret = resume.turret;
+        player.gravity_vector = resume.gravity_vector;
+        player.contact_flags = resume.contact_flags;
+        self.gear_down = resume.gear_down;
+        self.gear_word = resume.gear_word;
+        self.speed_word = resume.speed_word;
+        self.collision_radius = resume.collision_radius;
     }
 
     /// JJFFE's `FUNC_SetupCombatVelocity` (F750's and F770's hails): the
@@ -1466,6 +1574,11 @@ impl OriginalFlight {
         let limit = f64::from(self.forward_limit.max(1));
         flight.thrust = (f64::from(motion.thrust[2]) / limit).clamp(-1.0, 1.0);
         flight.ticks = flight.ticks.wrapping_add(1);
+        // The pad world and the autopilot hold state the words above do not
+        // describe (the ship's frame, its guidance), so a resume then rebuilds.
+        flight.resume =
+            (self.pad_world.is_none() && self.pad_local.is_none() && self.guidance.is_none())
+                .then(|| self.resume_state());
     }
 }
 
@@ -1513,6 +1626,67 @@ fn tick_guided(
 mod tests {
     use super::*;
     use crate::flight::{Flight, Mode};
+
+    /// Resume as `main` does: the model's state goes into the flight record,
+    /// through the native file, and a new model is built from it. `keep` is
+    /// whether the integer words travel with the save.
+    fn resumed(model: &mut OriginalFlight, template: &Flight, keep: bool) -> OriginalFlight {
+        let mut state = template.clone();
+        model.apply(&mut state);
+        if !keep {
+            state.resume = None;
+        }
+        let bytes =
+            crate::saves::encode_game(&crate::saves::SaveGame::from_flight(&state)).unwrap();
+        let loaded = crate::saves::decode_game(&bytes).unwrap().state;
+        OriginalFlight::from_flight(&loaded, None)
+    }
+
+    /// Fly with steering keys held 20 frames in every 50 (a save is made from a
+    /// menu, with no key down), resuming at frame 35 of each block. Returns the
+    /// first frame at which the resumed flight differs from the uninterrupted
+    /// one, if any.
+    fn first_difference(keep: bool) -> Option<usize> {
+        let template = Flight {
+            mode: Mode::Flight,
+            velocity: [0.0, 0.0, 50.0],
+            set_speed: Some(200_000),
+            ..Flight::default()
+        };
+        let held = Keys {
+            pitch_up: true,
+            left: true,
+            scancodes: [0x1eu8, 0x20].into_iter().collect(),
+            ..Keys::default()
+        };
+        let mut straight = OriginalFlight::from_flight(&template, None);
+        let mut cut = OriginalFlight::from_flight(&template, None);
+        for frame in 0..400 {
+            let keys = if frame % 50 < 20 {
+                &held
+            } else {
+                &Keys::default()
+            };
+            if frame % 50 == 35 {
+                cut = resumed(&mut cut, &template, keep);
+            }
+            straight.step(0.02, keys).unwrap();
+            cut.step(0.02, keys).unwrap();
+            if straight.player().motion != cut.player().motion {
+                return Some(frame);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_resumed_free_flight_matches_the_uninterrupted_one_exactly() {
+        // PAR-18: rates, sub-unit fractions, caps and thrust words are part of
+        // the save, so eight resumes in 400 frames change nothing.
+        assert_eq!(first_difference(true), None);
+        // Without them (what a save was before) the next frame already differs.
+        assert!(first_difference(false).is_some());
+    }
 
     #[test]
     fn selected_signed_speed_survives_save_and_model_reconstruction() {

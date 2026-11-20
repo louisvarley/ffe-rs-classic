@@ -28,7 +28,7 @@ extern void ref_timer_advance(void);
 extern void (*ref_intro_text_hook)(void);
 extern char *ref_expand_string(char *dest, long ffcode, void *vars);
 extern unsigned char ref_pl_mode;
-extern unsigned long ref_system_counter, ref_accel_counter, ref_time_accel;
+extern unsigned long ref_system_counter, ref_accel_counter, ref_time_accel, ref_time_accel_index;
 extern unsigned long ref_timer_last, ref_timer_next, ref_timer_min;
 extern unsigned long ref_st_boost;
 extern unsigned short ref_illegal_fire;
@@ -530,6 +530,18 @@ static unsigned long rng_hook(unsigned long bound)
     unsigned long result = rng_original(bound);
     fprintf(rng_log, "%lu %lu %08lx %08lx %lu %lu %p\n", frames, rng_seq++, before_a, before_b,
             bound, result, _ReturnAddress());
+    fflush(rng_log);
+    return result;
+}
+/* The same log for F1530 (DATA_007752), the other step of the pair: limit 0, result the low word. */
+static unsigned long (*rng1530_original)(void);
+static unsigned long rng1530_hook(void)
+{
+    unsigned long before_a = ref_jitter_a, before_b = ref_jitter_b;
+    unsigned long result = rng1530_original();
+    fprintf(rng_log, "%lu %lu %08lx %08lx 0 %lu %p\n", frames, rng_seq++, before_a, before_b,
+            result, _ReturnAddress());
+    fflush(rng_log);
     return result;
 }
 extern unsigned char ref_misjump_table[];
@@ -583,7 +595,7 @@ static unsigned long flight_launch_frame = 170, flight_thrust_frame = 260;
 static uint64_t flight_previous_hash;
 static const char *flight_scenario_name(void)
 {
-    return flight_scenario == 1 ? "takeoff" : flight_scenario == 2 ? "planet" : flight_scenario == 3 ? "hover" : flight_scenario == 4 ? "keyboard" : flight_scenario == 5 ? "launch" : flight_scenario == 6 ? "dock" : "idle";
+    return flight_scenario == 1 ? "takeoff" : flight_scenario == 2 ? "planet" : flight_scenario == 3 ? "hover" : flight_scenario == 4 ? "keyboard" : flight_scenario == 5 ? "launch" : flight_scenario == 6 ? "dock" : flight_scenario == 7 ? "paddock" : "idle";
 }
 
 static uint64_t flight_hash_value(uint64_t hash, uint64_t value)
@@ -602,6 +614,48 @@ static unsigned long state_u32(size_t offset)
     memcpy(&value, ref_state + offset, 4);
     return value;
 }
+
+/* FFE_POLICE_TRACE=1: every frame from 160, one row with F236's offended object
+   (DATA_008804+0x50dc) and the fields F238/F240 use (+0xc9 mode, +0xca current, +0xd8 timeout,
+   +0xdc police left, +0xde clock, +0x14c flags, +0xce face), DATA_008647's chase flag and
+   DATA_008646, then every police ship (+0x118 == 0xe): slot, +0xff state, model, parent, the
+   position relative to the offended object and the hull. Works in --legal-probe and --flight
+   (where FFE_FIRE_FROM makes the offence and FFE_RNG_TRACE logs F238's F1530/F922 draws). */
+static void police_trace_row(unsigned long frames)
+{
+    unsigned long player_pointer;
+    unsigned char *o, *list;
+    unsigned i;
+    int first = 1;
+    if (!getenv("FFE_POLICE_TRACE") || frames < 160 || !ref_pl_object_list) return;
+    player_pointer = state_u32(0xc8);
+    if (!player_pointer) return;
+    o = (unsigned char *)state_u32(0x50dc);
+    list = ref_pl_object_list;
+    printf("{\"police\":%lu,\"chase\":%u,\"wanted\":%u", frames, (unsigned)ref_alert, (unsigned)ref_wanted);
+    if (o) {
+        printf(",\"offended\":%ld,\"mode\":%u,\"current\":%u,\"timeout\":%u,\"left\":%d,\"clock\":%u,\"flags\":%u,\"face\":%u",
+               (long)((o - (list + 0x74)) / 0x152), (unsigned)o[0xc9], (unsigned)o[0xca],
+               (unsigned)(o[0xd8] | o[0xd9] << 8), (int)(short)(o[0xdc] | o[0xdd] << 8),
+               (unsigned)(o[0xde] | o[0xdf] << 8), (unsigned)o[0x14c],
+               (unsigned)(o[0xce] | o[0xcf] << 8));
+    }
+    printf(",\"ships\":[");
+    for (i = 1; i <= 0x72; ++i) {
+        unsigned char *s = list + i * 0x152 + 0x74;
+        if (s[0x87] != 0xb || s[0x118] != 0xe) continue;
+        printf("%s{\"slot\":%u,\"state\":%u,\"model\":%lu,\"parent\":%u,\"rel\":[%lld,%lld,%lld],\"hull\":%u}",
+               first ? "" : ",", i, (unsigned)s[0xff],
+               (unsigned long)(s[0x82] | s[0x83] << 8 | s[0x84] << 16 | s[0x85] << 24), (unsigned)s[0x56],
+               o ? *(long long *)(s + 0x3e) - *(long long *)(o + 0x3e) : 0LL,
+               o ? *(long long *)(s + 0x46) - *(long long *)(o + 0x46) : 0LL,
+               o ? *(long long *)(s + 0x4e) - *(long long *)(o + 0x4e) : 0LL,
+               (unsigned)(s[0xe4] | s[0xe5] << 8));
+        first = 0;
+    }
+    printf("]}\n");
+}
+
 
 static void state_set_u32(size_t offset, unsigned long value)
 {
@@ -763,8 +817,8 @@ static void flight_trace_row(void)
         /* stderr only: the reserve F929 spends (+0x11e), the shield and hull words F938 recharges
            and repairs (+0xe0, +0xe2, +0xe4), the hull temperature (DATA_008804+0x1ec), the
            fuel units (DATA_008804+0x15a/0x15c) and the frame's tics. */
-        fprintf(stderr, "{\"reserve\":%lu,\"mode\":%u,\"tics\":%lu,\"energy\":%lu,\"shield\":%u,\"shield_max\":%u,\"hull\":%u,\"heat\":%ld,\"fuel\":[%u,%u],\"marker\":%lu,\"day\":%lu,\"rng\":[%lu,%lu]}\n",
-                frames, (unsigned)ref_pl_mode, (unsigned long)ref_pl_frame_tics, (unsigned long)get32(player, 0x11e),
+        fprintf(stderr, "{\"reserve\":%lu,\"mode\":%u,\"tics\":%lu,\"refire\":%u,\"laser_heat\":%u,\"energy\":%lu,\"shield\":%u,\"shield_max\":%u,\"hull\":%u,\"heat\":%ld,\"fuel\":[%u,%u],\"marker\":%lu,\"day\":%lu,\"rng\":[%lu,%lu]}\n",
+                frames, (unsigned)ref_pl_mode, (unsigned long)ref_pl_frame_tics, (unsigned)get16(player, 0xe8), (unsigned)get16(player, 0xea), (unsigned long)get32(player, 0x11e),
                 (unsigned)get16(player, 0xe0), (unsigned)get16(player, 0xe2), (unsigned)get16(player, 0xe4),
                 (long)state_u32(0x1ec), (unsigned)(ref_state[0x15a] | ref_state[0x15b] << 8), (unsigned)(ref_state[0x15c] | ref_state[0x15d] << 8),
                 state_u32(8), state_u32(4), state_u32(0x24), state_u32(0x28));
@@ -899,6 +953,31 @@ static void keyboard_read(UCHAR *keys)
 void InputKeybReadStates(UCHAR *keys)
 {
     memset(keys, 0x80, 256);
+    {
+        /* FFE_SPACE_FROM=<frame>[ FFE_SPACE_TO=<frame>]: Space (the fire key) held through the
+           real input path, which runs after F149 and before the draw, as a player's shot does.
+           FFE_FIRE_AT fires at the end of a frame instead; JJFFE's "Laser invulnerability" loop
+           in F149 (ffe.asm:15045) then clears the draw flag (+0x151 bit 1) before F1536 sees it,
+           so no beam is drawn. FFE_LASER_CODE=<code> sets all four laser mounts from frame 600;
+           FFE_PRINT_E6 prints the shot words (+0xe6 length, +0x151 flags, +0x7e render shift). */
+        const char *from = getenv("FFE_SPACE_FROM"), *to = getenv("FFE_SPACE_TO"), *code = getenv("FFE_LASER_CODE");
+        unsigned long player = state_u32(0xc8);
+        if (code && player && frames >= 600) {
+            unsigned char *o = (unsigned char *)player;
+            o[0xd2] = (unsigned char)strtoul(code, 0, 0);
+            o[0xd3] = o[0xd4] = o[0xd5] = o[0xd2];
+        }
+        if (from && frames >= strtoul(from, 0, 0) && frames <= (to ? strtoul(to, 0, 0) : strtoul(from, 0, 0)))
+            keys[0x39] = 0;
+        if (getenv("FFE_PRINT_E6") && player && frames >= 698 && frames <= 704) {
+            unsigned char *o = (unsigned char *)player;
+            fprintf(stderr, "frame %lu e6=%04x flags=%02x refire=%04x heat=%04x scale7e=%08lx model=%lu\n", frames,
+                    (unsigned)(o[0xe6] | o[0xe7] << 8), o[0x151], (unsigned)(o[0xe8] | o[0xe9] << 8),
+                    (unsigned)(o[0xea] | o[0xeb] << 8),
+                    (unsigned long)(o[0x7e] | o[0x7f] << 8 | o[0x80] << 16 | (unsigned long)o[0x81] << 24),
+                    (unsigned long)(o[0x82] | o[0x83] << 8));
+        }
+    }
     if (flight_mode && flight_scenario == 4) {
         keyboard_read(keys);
         return;
@@ -906,7 +985,7 @@ void InputKeybReadStates(UCHAR *keys)
     /* F1037 reads Return (0x1c) to raise the set speed; F1043 reads numpad 8
        (0x48) for forward thrust. Both are raw scancodes. */
     if (((flight_mode && flight_scenario != 0) || (misjump_mode && !misjump_frame) || (game_frame_mode && getenv("FFE_TAKEOFF"))) &&
-        frames >= flight_thrust_frame) {
+        (frames >= flight_thrust_frame || (flight_scenario == 7 && frames >= 260 && frames < 300))) {
         keys[0x1c] = 0;
         keys[0x48] = 0;
     }
@@ -1191,6 +1270,7 @@ void TimerFrameUpdate(void)
             ref_laser_fire((unsigned char *)player_pointer, 0);
             legal_fired = 1;
         }
+        police_trace_row(frames);
         if (frames >= 160 && player_pointer != 0) {
             unsigned char *p = (unsigned char *)player_pointer;
             char msg[131];
@@ -1268,6 +1348,80 @@ void TimerFrameUpdate(void)
         }
         if (frames + 1 >= limit) exit(0);
     } else if (flight_mode) {
+        police_trace_row(frames);
+        {
+            /* FFE_PLAYER_TO_PIRATE=<frame>[,<offset units along z>]: at that frame the PLAYER (not an NPC) is put
+               in the first type-0xfb state-4 ship's frame, <offset> units from it, with that ship's velocity;
+               from then every frame the pirate-group ships' state/target/velocity/thrust/relative position is
+               written. The NPCs are untouched, so the original's own AI runs. */
+            static int ptp_leader;
+            const char *e = getenv("FFE_PLAYER_TO_PIRATE");
+            unsigned char *pl = (unsigned char *)state_u32(0xc8);
+            if (e && pl && ref_pl_object_list) {
+                unsigned long at = strtoul(e, 0, 0);
+                long long off = strchr(e, ',') ? strtoll(strchr(e, ',') + 1, 0, 0) : 20000000LL;
+                unsigned char *list = ref_pl_object_list;
+                unsigned i;
+                if (frames == at) {
+                    for (i = 1; i <= 0x72 && !ptp_leader; ++i) {
+                        unsigned char *o = list + i * 0x152 + 0x74;
+                        if (o[0x87] != 0xb || o[0x118] != 0xfb || o[0xff] != 4) continue;
+                        memcpy(pl + 0x3e, o + 0x3e, 24);
+                        *(long long *)(pl + 0x4e) += off;
+                        memcpy(pl + 0x8c, o + 0x8c, 12);
+                        pl[0x56] = o[0x56];
+                        pl[0x57] = o[0x57];
+                        ptp_leader = (int)i;
+                        fprintf(stderr, "ptp: player moved next to slot %u (parent %u) at frame %lu\n", i, (unsigned)o[0x56], frames);
+                    }
+                }
+                if (ptp_leader && frames >= at && getenv("FFE_PTP_RAW")) {
+                    unsigned char *o = list + ptp_leader * 0x152 + 0x74;
+                    unsigned char *b = list + o[0xfe] * 0x152 + 0x74;
+                    unsigned k;
+                    printf("{\"raw\":%lu,\"slot\":%d,\"body\":%u,\"ship\":\"", frames, ptp_leader, (unsigned)o[0xfe]);
+                    for (k = 0; k < 0x152; ++k) printf("%02x", o[k]);
+                    printf("\",\"bodyobj\":\"");
+                    for (k = 0; k < 0x152; ++k) printf("%02x", b[k]);
+                    printf("\",\"player\":\"");
+                    for (k = 0; k < 0x152; ++k) printf("%02x", pl[k]);
+                    printf("\"}\n");
+                }
+                if (ptp_leader && frames >= at) {
+                    for (i = 70; i <= 78; ++i) {
+                        unsigned char *o = list + i * 0x152 + 0x74;
+                        if (o[0x87] != 0xb) continue;
+                        printf("{\"ptp\":%lu,\"slot\":%u,\"state\":%u,\"target\":%u,\"velocity\":[%ld,%ld,%ld],\"thrust\":[%d,%d,%d],"
+                               "\"relative\":[%lld,%lld,%lld],\"hull\":%u,\"player_mode\":%u}\n",
+                               frames, i, (unsigned)o[0xff], (unsigned)o[0x100],
+                               *(long *)(o + 0x8c), *(long *)(o + 0x90), *(long *)(o + 0x94),
+                               (int)*(short *)(o + 0xb6), (int)*(short *)(o + 0xb8), (int)*(short *)(o + 0xba),
+                               *(long long *)(o + 0x3e) - *(long long *)(pl + 0x3e),
+                               *(long long *)(o + 0x46) - *(long long *)(pl + 0x46),
+                               *(long long *)(o + 0x4e) - *(long long *)(pl + 0x4e),
+                               (unsigned)(o[0xe4] | o[0xe5] << 8), (unsigned)ref_pl_mode);
+                    }
+                }
+            }
+        }
+        if (getenv("FFE_FLIGHT_SHIPS") && frames >= 160 && frames % 25 == 0) {
+            unsigned char *list = ref_pl_object_list;
+            unsigned i;
+            for (i = 1; i <= 0x72; ++i) {
+                unsigned char *o = list + i * 0x152 + 0x74;
+                if (o[0x87] != 0xb) continue;
+                printf("{\"frame\":%lu,\"slot\":%u,\"model\":%lu,\"state\":%u,\"type\":%u,"
+                       "\"parent\":%u,\"velocity\":[%ld,%ld,%ld],\"thrust\":[%d,%d,%d],"
+                       "\"position\":[%lld,%lld,%lld],\"target\":%u}\n",
+                       frames, i, (unsigned long)(o[0x82] | o[0x83] << 8 | o[0x84] << 16 | o[0x85] << 24),
+                       (unsigned)o[0xff], (unsigned)o[0x118], (unsigned)o[0x56],
+                       *(long *)(o + 0x8c), *(long *)(o + 0x90), *(long *)(o + 0x94),
+                       (int)*(short *)(o + 0xb6), (int)*(short *)(o + 0xb8), (int)*(short *)(o + 0xba),
+                       *(long long *)(o + 0x3e), *(long long *)(o + 0x46), *(long long *)(o + 0x4e),
+                       (unsigned)o[0x100]);
+            }
+            fflush(stdout);
+        }
         /* The boot/intro frames, the scripted launch and the free-flight tail.
            Frames before 140 are still covered by `--state`; this trace starts
            where the intro first has a stable mode. */
@@ -1275,6 +1429,21 @@ void TimerFrameUpdate(void)
             /* in free flight after the launch: target the parent station and engage F1020 */
             unsigned char *p = (unsigned char *)state_u32(0xc8);
             if (p) { p[0xca] |= 0x20; /* the docking computer: F1020 refuses without it */ ref_state[0xec] = p[0x56]; p[0xfe] = p[0x56]; flight_launch_sent = 2; ref_autopilot(); fprintf(stderr, "dock: autopilot requested at frame %lu, target %u, mode now %u\n", frames, (unsigned)p[0x56], (unsigned)ref_pl_mode); }
+        }
+        if (flight_scenario == 7 && flight_launch_sent == 1 && ref_pl_mode == 0 && frames >= flight_launch_frame + 600) {
+            /* in free flight after the launch: target the starport the ship left (DATA_008804+0xcc)
+               and engage F1020 with the docking computer fitted */
+            unsigned char *p = (unsigned char *)state_u32(0xc8);
+            unsigned char *port = (unsigned char *)state_u32(0xcc);
+            if (p && port && ref_pl_object_list) {
+                unsigned index = (unsigned)((port - ((unsigned char *)ref_pl_object_list + 0x74)) / 0x152);
+                p[0xca] |= 0x20;
+                ref_state[0xec] = (unsigned char)index;
+                p[0xfe] = (unsigned char)index;
+                flight_launch_sent = 2;
+                ref_autopilot();
+                fprintf(stderr, "paddock: autopilot requested at frame %lu, target %u, mode now %u\n", frames, index, (unsigned)ref_pl_mode);
+            }
         }
         if ((flight_scenario == 5 || flight_scenario == 6) && !flight_launch_sent && frames >= flight_launch_frame) {
             unsigned char entry[0x80] = {0};
@@ -1288,6 +1457,36 @@ void TimerFrameUpdate(void)
         {
             const char *off = getenv("FFE_ENGINES_OFF_AT"), *cut = getenv("FFE_LIMITS_CUT_AT");
             unsigned char *pl = (unsigned char *)state_u32(0xc8);
+            /* FFE_FIRE_FROM / FFE_FIRE_TO: the real F931 on the front mount at the end of every
+               frame in that range (PAR-01); F931 itself refuses while the refire word counts down,
+               the laser is hot or the reserve is empty, so the cadence is the original's. */
+            {
+                const char *from = getenv("FFE_FIRE_FROM"), *to = getenv("FFE_FIRE_TO");
+                if (from && pl && frames >= strtoul(from, NULL, 0) && (!to || frames <= strtoul(to, NULL, 0)))
+                    ref_laser_fire(pl, 0);
+            }
+            /* FFE_ACCEL_AT=<frame>:<step>[,<frame>:<step>...]: F208's own writes for step 0 (1x)
+               to 4 (10000x) at the end of that frame: the rate (DATA_009012, applied as DATA_007706
+               by F207), its index (DATA_009013) and, for 10x and faster, the second-event marker
+               pulled back one event (DATA_008808 -= 0xc22e). */
+            {
+                static const unsigned long rate[5] = {0x3e2, 0x26d6, 0x1845c, 0xf2b98, 0x97b3f0};
+                static const unsigned long index[5] = {0, 3, 7, 0xa, 0xc};
+                const char *list = getenv("FFE_ACCEL_AT");
+                while (list && *list) {
+                    char *end;
+                    unsigned long at = strtoul(list, &end, 0), step;
+                    if (*end != ':') break;
+                    step = strtoul(end + 1, &end, 0);
+                    if (frames == at && step < 5) {
+                        ref_time_accel = rate[step];
+                        ref_time_accel_index = index[step];
+                        if (step) state_set_u32(8, state_u32(8) - 0xc22e);
+                    }
+                    list = *end == ',' ? end + 1 : end;
+                    if (*end != ',') break;
+                }
+            }
             if (off && frames == strtoul(off, NULL, 0)) ref_state[0xe9] |= 1;
             if (cut && pl && frames == strtoul(cut, NULL, 0)) {
                 int w;
@@ -6301,7 +6500,6 @@ static int object_instance_vectors(void)
 extern void ref_autopilot_request(unsigned char *, unsigned char *, long, long *, long *, long, long, long *, void *);
 extern void ref_autopilot_turn(unsigned char *);
 extern void ref_autopilot_match(unsigned char *, unsigned char *, long);
-extern unsigned long ref_time_accel_index;
 static unsigned long ap_random = 0x12345678;
 static long ap_next(void) { ap_random ^= ap_random << 13; ap_random ^= ap_random >> 17; ap_random ^= ap_random << 5; return (long)ap_random; }
 static void ap_vec(long *v, int n) { int k; printf("["); for(k=0;k<n;k++) printf("%s%ld", k?",":"",v[k]); printf("]"); }
@@ -6583,10 +6781,23 @@ int main(int argc, char **argv)
            (DATA_008804+0xec, the player's parent station) is set and F1020 engages the autopilot,
            which flies the ship back to the station and runs the docking stages. */
         else if (!strcmp(argv[2], "dock")) { flight_scenario = 6; flight_thrust_frame = ~0UL; }
-        else fail("unknown --flight scenario (idle, takeoff, planet, hover, keyboard, launch, dock)");
+        /* paddock: a start on a planet's pad (--start-key=0x39 or 0x02): the Tab launch, the hover to free
+           flight (as hover), then the navigation target is the starport itself (not the planet the
+           player is parented to) and F1020 engages the autopilot, which flies the descent to the pad. */
+        else if (!strcmp(argv[2], "paddock")) { flight_scenario = 7; flight_thrust_frame = ~0UL; } /* Return and keypad 8 held for frames 260..299 only */
+        else fail("unknown --flight scenario (idle, takeoff, planet, hover, keyboard, launch, dock, paddock)");
         flight_mode = 1;
         limit = strtoul(argv[3], &end, 10);
         if (*end || limit < 200 || limit > 20000UL) fail("invalid --flight frame count");
+        /* FFE_RNG_TRACE=<file>: every F922 and F1530 draw of the run (the draw ledger of PAR-17). */
+        if (getenv("FFE_RNG_TRACE")) {
+            rng_log = fopen(getenv("FFE_RNG_TRACE"), "w");
+            if (!rng_log) fail("cannot open FFE_RNG_TRACE file");
+            rng_original = ref_rnd_func;
+            ref_rnd_func = rng_hook;
+            rng1530_original = ref_random_func;
+            ref_random_func = rng1530_hook;
+        }
         fprintf(stderr, "JJFFE flight-v1: the real game from boot; scenario %s, %lu frames, selected player/planet state per frame, no framebuffer.\n",
                 flight_scenario_name(), limit);
         asmmain(0, NULL);

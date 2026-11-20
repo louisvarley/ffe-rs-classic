@@ -69,8 +69,6 @@ pub enum Filter {
     Linear,
     /// xBRZ 2x: Edge-aware pixel upscaling (recommended for modern displays).
     XbrzX2,
-    /// xBRZ 3x: Higher quality edge-aware upscaling (slower).
-    XbrzX3,
     /// Scale2x: Fast edge-directed scaling.
     Scale2x,
 }
@@ -81,7 +79,6 @@ impl Filter {
             Self::Nearest => "nearest",
             Self::Linear => "linear",
             Self::XbrzX2 => "xbrz-2x",
-            Self::XbrzX3 => "xbrz-3x",
             Self::Scale2x => "scale2x",
         }
     }
@@ -91,18 +88,19 @@ impl Filter {
             "nearest" => Some(Self::Nearest),
             "linear" => Some(Self::Linear),
             "xbrz-2x" => Some(Self::XbrzX2),
-            "xbrz-3x" => Some(Self::XbrzX3),
+            // xBRZ 3x was removed (it looked poor in game); a saved choice
+            // of it loads as xBRZ 2x instead of discarding the whole file.
+            "xbrz-3x" => Some(Self::XbrzX2),
             "scale2x" => Some(Self::Scale2x),
             _ => None,
         }
     }
-    
+
     /// Returns the upscaling factor applied before window scaling.
     pub fn upscale_factor(self) -> usize {
         match self {
             Self::Nearest | Self::Linear => 1,
             Self::XbrzX2 | Self::Scale2x => 2,
-            Self::XbrzX3 => 3,
         }
     }
 }
@@ -156,7 +154,7 @@ pub struct DisplaySettings {
     pub scanline_intensity: f32,
 }
 
-impl Eq for DisplaySettings {}  // f32 fields are always finite, so Eq is safe
+impl Eq for DisplaySettings {} // f32 fields are always finite, so Eq is safe
 
 impl Default for DisplaySettings {
     /// 1280x960, pixel-perfect, nearest, 4:3: the port's existing initial
@@ -341,10 +339,10 @@ pub fn compose(
     if width == 0 || height == 0 || logical.len() < LOGICAL_WIDTH * LOGICAL_HEIGHT {
         return;
     }
-    
+
     // Step 1: Apply pixel-art upscaling filter if needed
     let rect = settings.rect((width, height));
-    
+
     match settings.filter {
         Filter::Nearest | Filter::Linear => {
             // No pre-upscaling, scale directly to window
@@ -369,18 +367,6 @@ pub fn compose(
                 Filter::Nearest, // Use nearest for final scaling after upscale
             );
         }
-        Filter::XbrzX3 => {
-            use crate::filters::xbrz_3x;
-            let upscaled = xbrz_3x(logical);
-            blit(
-                &upscaled,
-                (LOGICAL_WIDTH * 3, LOGICAL_HEIGHT * 3),
-                target,
-                width,
-                rect,
-                Filter::Nearest,
-            );
-        }
         Filter::Scale2x => {
             use crate::filters::scale2x;
             let upscaled = scale2x(logical);
@@ -394,7 +380,7 @@ pub fn compose(
             );
         }
     }
-    
+
     // Step 2: Apply scanlines if enabled
     if settings.scanlines && settings.scanline_intensity > 0.0 {
         use crate::filters::apply_scanlines;
@@ -414,19 +400,19 @@ fn blit(
     if rect.width == 0 || rect.height == 0 || target_width == 0 {
         return;
     }
-    
+
     let (source_width, source_height) = source_size;
-    
+
     // For pixel-art filters, we already upscaled, so use nearest for final scaling
     // For Nearest/Linear, we scale directly from 320×200
     let use_linear = matches!(filter, Filter::Linear);
-    
+
     for dy in 0..rect.height {
         let row = (rect.y + dy) * target_width + rect.x;
         let Some(destination) = target.get_mut(row..row + rect.width) else {
             continue;
         };
-        
+
         if use_linear {
             // Bilinear sampling
             let (y0, y1, fy) = linear_row(dy, rect.height, source_height);
@@ -540,12 +526,58 @@ pub fn open_window(title: &str, request: WindowRequest) -> Result<GameWindow, St
     )
     .map_err(|error| format!("Cannot open game window: {error}"))?;
     window.set_target_fps(60);
+    apply_window_icon(&window);
     window.topmost(request.fullscreen);
     if request.fullscreen {
         window.set_position(0, 0);
     }
     Ok(GameWindow { window })
 }
+
+/// Give the window the icon embedded in `ffe-rs.exe` (resource 1, see
+/// `build.rs`) for its title bar and the taskbar; minifb's window class has
+/// none. Nothing happens when the executable carries no icon.
+#[cfg(windows)]
+fn apply_window_icon(window: &Window) {
+    use std::ptr::null;
+    use winapi::shared::minwindef::{LPARAM, WPARAM};
+    use winapi::shared::windef::HWND;
+    use winapi::um::libloaderapi::GetModuleHandleW;
+    use winapi::um::winuser::{
+        GetSystemMetrics, LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, IMAGE_ICON,
+        MAKEINTRESOURCEW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, WM_SETICON,
+    };
+    let hwnd = window.get_window_handle() as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: `hwnd` is the live window just created by minifb; the icon is a
+    // shared resource of this executable (`LoadImageW` with an integer
+    // resource id), which the system keeps for the process's lifetime.
+    unsafe {
+        let module = GetModuleHandleW(null());
+        for (kind, width, height) in [
+            (ICON_BIG, SM_CXICON, SM_CYICON),
+            (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
+        ] {
+            // MAKEINTRESOURCE(1): the id `winresource::set_icon` gives the icon.
+            let icon = LoadImageW(
+                module,
+                MAKEINTRESOURCEW(1),
+                IMAGE_ICON,
+                GetSystemMetrics(width),
+                GetSystemMetrics(height),
+                0,
+            );
+            if !icon.is_null() {
+                SendMessageW(hwnd, WM_SETICON, kind as WPARAM, icon as LPARAM);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_window_icon(_window: &Window) {}
 
 /// The desktop size for borderless full-screen. Windows only; the port's
 /// release target. `GetSystemMetrics` takes and returns plain integers, so
@@ -625,7 +657,7 @@ impl Presenter {
         if size.0 == 0 || size.1 == 0 {
             return Ok(false);
         }
-        
+
         // Use compose to handle filters and scanlines
         compose(logical, settings, size.0, size.1, &mut self.buffer);
         self.size = size;
@@ -836,12 +868,17 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_xbrz_3x_loads_as_xbrz_2x() {
+        let settings = DisplaySettings::from_config("filter=xbrz-3x\n").unwrap();
+        assert_eq!(settings.filter, Filter::XbrzX2);
+    }
+
+    #[test]
     fn the_config_round_trips_and_rejects_bad_values() {
         for filter in [
             Filter::Nearest,
             Filter::Linear,
             Filter::XbrzX2,
-            Filter::XbrzX3,
             Filter::Scale2x,
         ] {
             let settings = DisplaySettings {

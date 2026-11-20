@@ -1264,11 +1264,16 @@ fn run(
             }
             3 | 4 | 7 | 8 => {
                 for face in program.faces.iter().filter(|f| f.offset == offset) {
-                    let shade = visibility
-                        .normals
-                        .get(usize::from(face.normal))
-                        .filter(|normal| !normal.culled)
-                        .map_or([0; 3], |normal| normal.colour);
+                    // F1762 mutates normal 0 in the shared normal table. Faces
+                    // queued afterward must see that colour, not the F1480 seed.
+                    let shade = match (face.normal, result.normal_zero_colour) {
+                        (0, Some(colour)) => colour,
+                        _ => visibility
+                            .normals
+                            .get(usize::from(face.normal))
+                            .filter(|normal| !normal.culled)
+                            .map_or([0; 3], |normal| normal.colour),
+                    };
                     let mut emission = Emission {
                         face: face.clone(),
                         context: working.clone(),
@@ -1623,7 +1628,8 @@ fn run(
                         // (0x8000) value is an absolute 0..0x7fff size; any
                         // other is shifted by +0x148 - 7.
                         let mut size = angle_operand(chain.size as i16, working);
-                        if size & 0x8000 != 0 {
+                        let absolute = size & 0x8000 != 0;
+                        if absolute {
                             size &= 0x7fff;
                         } else {
                             let shift = instance.operand_scale.wrapping_sub(7);
@@ -1633,12 +1639,14 @@ fn run(
                                 size.wrapping_shl(shift as u32 & 31)
                             };
                         }
-                        // F1766 skips the whole chain when the instance is at or
-                        // behind the eye; otherwise F1666 divides by its depth.
-                        if instance.position[2] > 0 {
+                        // F1766 absolute sizes bypass both the depth gate and division.
+                        if absolute || instance.position[2] > 0 {
                             let key = model_depth::key(instance.position, instance.key_scale);
-                            let size =
-                                crate::model_thruster::special_divide(size, instance.position[2])?;
+                            let size = if absolute {
+                                size
+                            } else {
+                                crate::model_thruster::special_divide(size, instance.position[2])?
+                            };
                             // F1766 runs each pair's high byte and then its low
                             // byte: it stops before a high byte of 0x7f, and after
                             // the high byte when the low byte is 0x7f, so `7f nn`

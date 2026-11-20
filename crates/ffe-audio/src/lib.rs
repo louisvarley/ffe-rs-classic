@@ -1,8 +1,9 @@
 //! HMP music playback and the interface the preferences page uses.
 //!
-//! `ffe_core::hmp` parses the 17 original HMP songs. This crate turns them into
-//! timed MIDI messages, scales the user's volume, and sends them to a system MIDI
-//! device (WinMM on Windows) or to a recording/null backend for tests.
+//! `ffe_core::hmp` parses the 17 original HMP songs. This crate renders them
+//! through GeneralUser GS/OxiSynth into a per-user PCM cache, then mixes music and
+//! effects through WinMM (Windows) or CPAL (Linux). The event player and
+//! recording/null backends remain available for tests and Windows fallback.
 //!
 //! The crate deliberately does not depend on the game's screen or preferences
 //! code. See `docs/notes/sound.md` for the original routine references and the
@@ -12,6 +13,7 @@ mod audio;
 pub mod library;
 pub mod mixer;
 pub mod player;
+pub mod render;
 pub mod settings;
 pub mod sink;
 #[cfg(target_os = "windows")]
@@ -27,6 +29,7 @@ pub use mixer::{
     SampleDesc, WavError, EFFECT_NAMES, SAMPLE_RATE, SAMPLE_TABLE, VOICE_COUNT,
 };
 pub use player::{LoopMode, MusicPlayer};
+pub use render::{default_cache_dir, RenderedMusic, MUSIC_SAMPLE_RATE};
 pub use settings::{AudioSettings, SoundFlags, SONG_COUNT};
 pub use sink::{
     MidiSink, MixerSampleSink, NullMidiSink, NullSampleSink, RecordingMidiSink, RecordingMixSink,

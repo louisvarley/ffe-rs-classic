@@ -4,13 +4,10 @@
 //! F106, `L n` the article's slot word F95, `R` a fresh draw from the shared
 //! pair), F74 a signed number.
 //!
-//! Ported: `Gr` (a `0x02 n` colour change), `Mi` (F64's query to the
-//! scripts), `Ca` (the player's cash), `Fm`/`Ff`/`Cr`/`Co` (F791 names of
-//! kinds 1, 2 and 12), `Dr` (a date between two day offsets), `Nu` (a
-//! number between two bounds) and `Pn` (the commander's name). The other
-//! macros (the journals' systems, ranks and alternatives) are kept as they
-//! are until they are ported; an unknown code drops its two letters and
-//! keeps the `[`, as F76 does.
+//! Ported: `Gr`, `Mi`, `Ca`, `Fm`/`Ff`/`Cr`/`Co`, `Dr`, `Nu`, `Sl`, `Oo`,
+//! `Ri`, `Rf`, `Re`, `Sh`, `Pn`, `Cs` and `Zz`. Remaining system and
+//! ship-object macros are kept as written until they are ported; an unknown
+//! code drops its two letters and keeps the `[`, as F76 does.
 
 /// What the macros read from the game and the scripts.
 pub trait Macros {
@@ -28,6 +25,24 @@ pub trait Macros {
     fn name(&mut self, kind: u32, seed: i32) -> Vec<u8>;
     /// F1358's date text for absolute day `day`.
     fn date(&mut self, day: u32) -> Vec<u8>;
+    /// F76's `Re`: the player's Elite rating word.
+    fn elite_rating(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+    /// F76's `Ri`/`Rf`: the player's Imperial/Federal rank word.
+    fn military_rank(&mut self, _imperial: bool) -> Vec<u8> {
+        Vec::new()
+    }
+    /// F76's `Sh`: the player's ship model name.
+    fn ship_model_name(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+    /// F76's `Cs`: the current system's F860 name.
+    fn current_system_name(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+    /// F76's `Zz`: clear one lazy random word in `DATA_008567`.
+    fn reset_random_word(&mut self, _index: i32) {}
 }
 
 /// F921 on two seed words: a number below `range` (the words advance).
@@ -94,6 +109,60 @@ impl Reader<'_> {
         self.take();
         (low, high)
     }
+
+    /// The bytes in one parenthesized argument group, including nested groups.
+    fn group(&mut self) -> &'_ [u8] {
+        self.take(); // opening parenthesis
+        let start = self.at;
+        let mut depth = 0usize;
+        let mut quoted = false;
+        while self.peek() != 0 {
+            let byte = self.take();
+            if byte == b'"' {
+                quoted = !quoted;
+            } else if !quoted {
+                match byte {
+                    b'(' => depth += 1,
+                    b')' if depth == 0 => return &self.text[start..self.at - 1],
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+            }
+        }
+        &self.text[start..self.at]
+    }
+}
+
+/// F76's argument lists use commas between alternatives except inside quotes
+/// or nested groups.
+fn alternatives(args: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut quoted = false;
+    for (index, byte) in args.iter().enumerate() {
+        if *byte == b'"' {
+            quoted = !quoted;
+        } else if !quoted {
+            match *byte {
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                b',' if depth == 0 => {
+                    out.push(&args[start..index]);
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    out.push(&args[start..]);
+    out
+}
+
+fn choice(seed: i32, count: usize) -> usize {
+    let mut a = seed as u32;
+    let mut b = a;
+    f921(count as u32, &mut a, &mut b) as usize
 }
 
 /// F77: expand every `[` macro in `text`; `0xd5` becomes `'`.
@@ -157,7 +226,50 @@ fn macro_(reader: &mut Reader<'_>, out: &mut Vec<u8>, macros: &mut dyn Macros) {
                 out.extend(low.wrapping_add(draw).to_string().bytes());
             }
         }
+        b"Sl" => {
+            let seed = reader.seed(macros);
+            let args = reader.group();
+            let mut choices = Vec::new();
+            let mut choice_start = None;
+            for (index, byte) in args.iter().enumerate() {
+                match (*byte, choice_start) {
+                    (b'"', None) => choice_start = Some(index + 1),
+                    (b'"', Some(begin)) => {
+                        choices.push(&args[begin..index]);
+                        choice_start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if !choices.is_empty() {
+                out.extend_from_slice(choices[choice(seed, choices.len())]);
+            }
+        }
+        b"Oo" => {
+            let seed = reader.seed(macros);
+            let choices = alternatives(reader.group());
+            if !choices.is_empty() {
+                out.extend(expand(choices[choice(seed, choices.len())], macros));
+            }
+        }
+        b"Ri" => out.extend(macros.military_rank(true)),
+        b"Rf" => out.extend(macros.military_rank(false)),
+        b"Re" => out.extend(macros.elite_rating()),
+        b"Sh" => out.extend(macros.ship_model_name()),
         b"Pn" => out.extend(macros.commander()),
+        b"Cs" => {
+            let _ = reader.seed(macros);
+            out.extend(macros.current_system_name());
+        }
+        b"Zz" => {
+            for argument in alternatives(reader.group()) {
+                let mut number = Reader {
+                    text: argument,
+                    at: 0,
+                };
+                macros.reset_random_word(number.number());
+            }
+        }
         _ => {
             // Not ported yet: keep the macro as written.
             if is_known(&code) {
@@ -184,10 +296,17 @@ fn is_known(code: &[u8; 2]) -> bool {
 mod tests {
     use super::*;
 
-    struct Fixed;
+    struct Fixed {
+        seed: i32,
+        resets: Vec<i32>,
+    }
     impl Macros for Fixed {
         fn seed(&mut self, kind: u8, n: i32) -> i32 {
-            i32::from(kind) * 100 + n
+            if self.seed == 0 {
+                i32::from(kind) * 100 + n
+            } else {
+                self.seed
+            }
         }
         fn query(&mut self, word: i32, name: &str) -> Vec<u8> {
             format!("<{name}:{word}>").into_bytes()
@@ -207,27 +326,72 @@ mod tests {
         fn date(&mut self, day: u32) -> Vec<u8> {
             format!("D{day}").into_bytes()
         }
+        fn elite_rating(&mut self) -> Vec<u8> {
+            b"Harmless".to_vec()
+        }
+        fn military_rank(&mut self, imperial: bool) -> Vec<u8> {
+            if imperial {
+                b"Imperial".to_vec()
+            } else {
+                b"Federal".to_vec()
+            }
+        }
+        fn ship_model_name(&mut self) -> Vec<u8> {
+            b"Saker Mk III".to_vec()
+        }
+        fn current_system_name(&mut self) -> Vec<u8> {
+            b"Hope".to_vec()
+        }
+        fn reset_random_word(&mut self, index: i32) {
+            self.resets.push(index);
+        }
     }
 
     #[test]
     fn the_script_texts_macros_expand() {
+        let mut fixed = Fixed {
+            seed: 0,
+            resets: Vec::new(),
+        };
         let text = b"Commander [Pn. By [MiR(Finn date1), $[MiL0(cash) and [Ca.";
-        let out = expand(text, &mut Fixed);
+        let out = expand(text, &mut fixed);
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "Commander Jameson. By <Finn date1:8200>, $<cash:7600> and $123.4."
         );
-        let numbers = String::from_utf8(expand(b"[NuG2(10,20) [FfG1", &mut Fixed)).unwrap();
+        let numbers = String::from_utf8(expand(b"[NuG2(10,20) [FfG1", &mut fixed)).unwrap();
         let (low, rest) = numbers.split_once(' ').unwrap();
         let value: i32 = low.parse().unwrap();
         assert!((10..20).contains(&value));
         assert_eq!(rest, "N2/7101");
+        assert_eq!(
+            expand(b"[CrL1 Corporation", &mut fixed),
+            b"N12/7601 Corporation"
+        );
+        assert_eq!(expand(b"[Cs and", &mut fixed), b"Hopeand");
+        assert_eq!(expand(b"[SlL1(\"his\",\"her\")", &mut fixed), b"his");
+        assert_eq!(expand(b"[SlL1(\"h,is\",\"her\")", &mut fixed), b"h,is");
+        assert_eq!(
+            expand(b"[OoL1([SlL1(\"his\",\"her\"),other)", &mut fixed),
+            b"his"
+        );
+        fixed.seed = 0x4000_0000;
+        assert_eq!(expand(b"[SlL1(\"his\",\"her\")", &mut fixed), b"her");
+        assert_eq!(
+            expand(b"[OoL1(one,[SlL1(\"his\",\"her\"))", &mut fixed),
+            b"her"
+        );
+        assert_eq!(expand(b"[Re", &mut fixed), b"Harmless");
+        assert_eq!(expand(b"[Ri [Rf", &mut fixed), b"Imperial Federal");
+        assert_eq!(expand(b"[Sh", &mut fixed), b"Saker Mk III");
+        assert_eq!(expand(b"[Zz(1,2,-3)", &mut fixed), b"");
+        assert_eq!(fixed.resets, [1, 2, -3]);
         // A macro not ported yet stays as written; an unknown one loses its
         // letters but keeps the bracket.
         assert_eq!(
-            expand(b"[SyL1(I) [Qq!", &mut Fixed),
+            expand(b"[SyL1(I) [Qq!", &mut fixed),
             b"[SyL1(I) [!".to_vec()
         );
-        assert_eq!(expand(&[0xd5], &mut Fixed), b"'".to_vec());
+        assert_eq!(expand(&[0xd5], &mut fixed), b"'".to_vec());
     }
 }

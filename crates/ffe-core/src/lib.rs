@@ -22,6 +22,7 @@ pub mod keyboard;
 pub mod landing;
 pub mod laser;
 pub mod lift;
+pub mod map_diagram;
 pub mod market;
 pub mod message_strings;
 pub mod mining;
@@ -51,16 +52,19 @@ pub mod objects;
 pub mod pads;
 pub mod physics;
 pub mod player;
+pub mod police;
 pub mod script;
 pub mod second_events;
 pub mod sector;
 pub mod shipyard;
+pub mod short_float;
 mod shipyard_table;
 pub mod spawn;
 pub mod star_points;
 pub mod status;
 pub mod surface;
 pub mod sysgen;
+pub mod system_text;
 pub mod terrain;
 pub mod terrain_draw;
 pub mod terrain_emit;
@@ -243,6 +247,92 @@ mod frame_timer_tests {
         let fast = timer.advance(0.02, 0x26d6);
         assert_eq!((fast.real_tics, fast.tics), (994, 0x26d6));
         assert!((frame.seconds() - 0.02).abs() < 1e-12);
+    }
+
+    /// F208's acceleration words (`DATA_007706`, the console's table).
+    const ACCELERATION: [u32; 5] = [0x3e2, 0x26d6, 0x1_845c, 0xf_2b98, 0x97_b3f0];
+
+    /// F152's events for a scripted acceleration: `schedule` lists (real second,
+    /// F208 step), each taking effect on the first frame at or after that second.
+    /// Returns (events, milliseconds, 50 Hz callbacks).
+    fn events_at(fps: f64, schedule: &[(f64, usize)], real_seconds: f64) -> (u64, u64, u64) {
+        use crate::second_events::SecondEvents;
+        let mut timer = FrameTimer::default();
+        let mut events = SecondEvents::default();
+        let mut step = 0usize;
+        let mut next = 0usize;
+        let (mut due, mut ms, mut ticks) = (0u64, 0u64, 0u64);
+        for i in 0..(real_seconds * fps).round() as usize {
+            let now = i as f64 / fps;
+            while next < schedule.len() && now + 1e-9 >= schedule[next].0 {
+                step = schedule[next].1;
+                events.select_acceleration(step);
+                next += 1;
+            }
+            let frame = timer.advance(1.0 / fps, ACCELERATION[step]);
+            due += u64::from(events.advance(frame.tics));
+            ms += u64::from(frame.ms);
+            ticks += u64::from(frame.ticks_50hz);
+        }
+        (due, ms, ticks)
+    }
+
+    #[test]
+    fn every_frame_rate_dispatches_the_same_events_through_every_acceleration_step() {
+        // PAR-12: one scripted run of 1x, 10x, 100x, 1000x, 10000x and back at
+        // 20, 50, 60 and 144 fps. F152 dispatches from the accumulated day
+        // fraction, not per frame, so every rate dispatches the events the
+        // accumulated tics are worth (and so makes the same F938/F1007 rolls),
+        // whatever its frame length: the totals differ from the ideal only by
+        // F1418's per-frame truncation, under one tic a frame.
+        let schedule = [(10.0, 1), (20.0, 2), (30.0, 3), (40.0, 4), (45.0, 0)];
+        let segments = [
+            (10.0, 0),
+            (10.0, 1),
+            (10.0, 2),
+            (10.0, 3),
+            (5.0, 4),
+            (15.0, 0),
+        ];
+        let ideal_tics: f64 = segments
+            .iter()
+            .map(|(seconds, step)| seconds * 1000.0 * f64::from(ACCELERATION[*step]) / 20.0)
+            .sum();
+        // Steps 1 to 4 each bring one event forward (F208's marker pull-back).
+        let ideal = (ideal_tics / 49_710.0) as u64 + 4;
+        for fps in [20.0, 50.0, 60.0, 144.0] {
+            let (due, ms, ticks) = events_at(fps, &schedule, 60.0);
+            assert_eq!(ms, 60_000, "{fps} fps");
+            assert_eq!(ticks, 3_000, "{fps} fps");
+            assert!(
+                due.abs_diff(ideal) <= 2,
+                "{fps} fps: {due} events against {ideal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pause_adds_no_events_and_a_stall_is_what_the_loop_hands_over() {
+        use crate::second_events::SecondEvents;
+        // Pause, the preference pages and focus loss do not call the timer at
+        // all (`clock_runs`), so the accumulator is exactly where it was: the
+        // port's rule for a stalled window is no catch-up, and the loop clamps
+        // one long frame to 0.1 s (`real_dt`), 100 ms of game time.
+        let mut timer = FrameTimer::default();
+        let mut events = SecondEvents::default();
+        let mut due = 0;
+        for _ in 0..100 {
+            due += events.advance(timer.advance(0.02, REAL_TIME).tics);
+        }
+        let held = (due, events.pending(), timer);
+        // Paused for any length of real time: no calls, nothing moves.
+        assert_eq!((due, events.pending(), timer), held);
+        let stalled = timer.advance(30.0_f64.min(0.1), REAL_TIME);
+        assert_eq!((stalled.ms, stalled.tics), (100, 4_970));
+        assert_eq!(stalled.ticks_50hz, 5);
+        due += events.advance(stalled.tics);
+        // 100 frames of 994 tics (99,400) plus 4,970 is two events and 4,950 left.
+        assert_eq!((due, events.pending()), (2, 104_370 - 2 * 49_710));
     }
 
     #[test]

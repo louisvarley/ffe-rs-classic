@@ -126,6 +126,10 @@ pub struct Body {
     /// then turns the result by the parent's rows. [`Self::rows`] is the
     /// product, already in the system frame.
     pub parent_frame: Option<([i32; 9], [i32; 9])>,
+    /// Where the object this one orbits stands (the system list's parent, which
+    /// may be a binary's barycentre that is not itself a body), in the system
+    /// frame; `None` for a root. The system map draws the orbit about it.
+    pub orbit_centre: Option<[i64; 3]>,
 }
 
 /// A mission script's object kept at a body (F297 on a planet's surface, F40
@@ -621,6 +625,8 @@ fn system_bodies(list: &PhysList, system: &[u8], count: usize) -> Vec<Body> {
                 position[k] += base[k];
             }
         }
+        let orbit_centre =
+            (parent != 0).then(|| offsets.get(parent - 1).copied().unwrap_or([0; 3]));
         offsets.push(position);
         if kind_code == 0 {
             continue;
@@ -665,6 +671,7 @@ fn system_bodies(list: &PhysList, system: &[u8], count: usize) -> Vec<Body> {
             temperature: list.word(slot, 0xe0) as i16,
             size_word: list.word(slot, 0xa6) as i16,
             parent_frame,
+            orbit_centre,
         });
     }
     out
@@ -1483,6 +1490,15 @@ pub struct Navigator {
     /// The player's legal standing (`DATA_008646` bit 0 / `DATA_008647`): the
     /// police alert that makes police and military ships hostile.
     pub legal: npc::Legal,
+    /// F236's offended starport (`DATA_008804+0x50dc`): the body whose record
+    /// F238's police launch and F240's clock act on. The witness of the last
+    /// recorded offence (F234), or the station the player was docked at.
+    pub offended: Option<usize>,
+    /// Game tics towards F152's next whole day (`0xc22e`), when F238 runs.
+    police_clock: u32,
+    /// The police F238 asked F239 for, made by [`Self::spawn_police`] (which has
+    /// the content cache): the offended body and the launch.
+    police_launches: Vec<(usize, ffe_core::police::Launch)>,
     /// The commander's military/Elite standing (`DATA_008911`-`8913`,
     /// `DATA_009091`).
     pub career: npc::Career,
@@ -1561,6 +1577,10 @@ pub struct Navigator {
     /// The boards F622 drew from the shared pair when the system was entered,
     /// until [`Self::station_offers`] turns each into its starport's offers.
     boards: HashMap<(u32, usize), ffe_core::bbs::Board>,
+    /// The same boards as F633 keeps changing them on the shared pair, for the
+    /// current system's places, whether or not the station has been visited:
+    /// F633's draws depend on each board's entry and ship counts (PAR-17).
+    pair_boards: HashMap<(u32, usize), ffe_core::bbs::Board>,
     /// `DATA_009006..9`: the destinations F638 remembers for F636.
     bbs_remembered: ffe_core::bbs::Remembered,
     /// `DATA_009004`: the news and job list F623's rounds fill (F624).
@@ -2210,6 +2230,32 @@ fn system_entry(
     })
 }
 
+/// F832 for a star the galaxy map selected: its code, F856 position and F841
+/// type word (the same inputs a map destination is generated from).
+pub fn map_entry(
+    cache: &VerifiedCache,
+    code: u32,
+    position: [i32; 3],
+    kind: u16,
+) -> Result<Entry, String> {
+    let galaxy = GalaxyTables::new(
+        cache
+            .asset("base:world/galaxy-tables")
+            .ok_or("no galaxy tables (cache v21)")?,
+    )?;
+    let strings = Strings::new(
+        cache
+            .asset("base:text/system-strings")
+            .ok_or("no system strings (cache v22)")?,
+    )?;
+    let system = Tables::new(
+        cache
+            .asset("base:world/system-tables")
+            .ok_or("no system tables")?,
+    )?;
+    system_entry(code, position, u32::from(kind), &galaxy, &system, &strings)
+}
+
 /// F829/F832/F869/F830 for one record of `DATA_006820`: the system F830 names,
 /// generated from the record's coordinates and extra word with F878's inputs.
 /// Record 0 is the DOS default start (Gateway [-1,4], the planet Hope and the
@@ -2316,6 +2362,9 @@ pub struct NavigatorSave {
     #[serde(default)]
     pub docked: Option<usize>,
     pub legal: ffe_core::npc::Legal,
+    /// F236's offended starport (a body index).
+    #[serde(default)]
+    pub offended: Option<usize>,
     #[serde(default)]
     pub ship_lock: Option<u32>,
     #[serde(default)]
@@ -2390,6 +2439,10 @@ pub struct NavigatorContinuationSave {
     /// Sorted by system code and station index for deterministic encoding.
     pub offers: Vec<(u32, usize, StationOffers)>,
     pub boards: Vec<(u32, usize, ffe_core::bbs::Board)>,
+    /// F633's working copy of the current system's boards (see
+    /// `Navigator::pair_boards`); older saves have none.
+    #[serde(default)]
+    pub pair_boards: Vec<(u32, usize, ffe_core::bbs::Board)>,
     pub boards_entered: Option<u32>,
     pub bbs_remembered: ffe_core::bbs::Remembered,
     pub bbs_jobs: Vec<ffe_core::bbs::Job>,
@@ -2681,6 +2734,9 @@ impl Navigator {
             dust: dust::Field::new(seed.0, seed.1),
             random: npc::Random::start(),
             legal: npc::Legal::default(),
+            offended: None,
+            police_clock: 0,
+            police_launches: Vec::new(),
             career: npc::Career::default(),
             jurisdiction,
             persisted: Vec::new(),
@@ -2714,6 +2770,7 @@ impl Navigator {
             saved_markets: HashMap::new(),
             offers: HashMap::new(),
             boards: HashMap::new(),
+            pair_boards: HashMap::new(),
             bbs_remembered: ffe_core::bbs::Remembered::default(),
             bbs_jobs: Vec::new(),
             boards_entered: None,
@@ -2743,7 +2800,11 @@ impl Navigator {
     /// the open-air pad.
     pub fn new_game(cache: &VerifiedCache, start_type: u8) -> Result<Self, String> {
         let spec = crate::boot::StartSpec::get(start_type)?;
-        let record_index = if matches!(start_type, 1..=3) { usize::from(start_type) } else { 0 };
+        let record_index = if matches!(start_type, 1..=3) {
+            usize::from(start_type)
+        } else {
+            0
+        };
         let default_arm = !matches!(start_type, 1..=3);
         let record = START_SYSTEMS[record_index];
         let code = (record.0 >> 16) as u32 & 0x1fff
@@ -2770,7 +2831,8 @@ impl Navigator {
         } else {
             return Err(format!("start system {code:#x} is not in the galaxy table"));
         };
-        let (ship, cash, starport_slot, player_index) = (spec.ship, spec.cash, spec.port, spec.player);
+        let (ship, cash, starport_slot, player_index) =
+            (spec.ship, spec.cash, spec.port, spec.player);
         let bodies = bodies(cache, &entries[current], clock_words(NEW_GAME_CLOCK))?;
         let index = bodies
             .iter()
@@ -2792,7 +2854,10 @@ impl Navigator {
         // than bay 0 at both original starts, facing a different part of town.
         let bay = if spec.mode == 0x2a {
             port.pads[0] = PLAYER;
-            ffe_core::traffic::Bay { index: 0, fresh: true }
+            ffe_core::traffic::Bay {
+                index: 0,
+                fresh: true,
+            }
         } else {
             port.pads[1] = 0xff;
             let bay = port.allocate(PLAYER);
@@ -2817,7 +2882,11 @@ impl Navigator {
         // F994 copies the station's orientation to the ship and puts it on the
         // pad: F650's offset plus the ship's collision radius along its up row.
         let radius = models.info(ship).radii().1 as i32;
-        let offset = if spec.mode == 0x2a { [0; 3] } else { body.pad_offset(&pads, bay.index, radius, false)? };
+        let offset = if spec.mode == 0x2a {
+            [0; 3]
+        } else {
+            body.pad_offset(&pads, bay.index, radius, false)?
+        };
         let seat: [i64; 3] = std::array::from_fn(|k| body.position[k].wrapping_add(offset[k]));
         let cargo = (models.cargo_space(ship).unwrap_or(0) - spec.hold_loss).max(0);
         let mut nav = Self::assemble(cache, entries, current, bodies)?;
@@ -2874,6 +2943,7 @@ impl Navigator {
             altitude: self.altitude,
             docked: self.docked,
             legal: self.legal,
+            offended: self.offended,
             ship_lock: self.ship_lock,
             missile_lock: self.missile_lock,
             missile_view: self.missile_view,
@@ -2981,6 +3051,15 @@ impl Navigator {
                         records.sort_by_key(|(code, index, _)| (*code, *index));
                         records
                     },
+                    pair_boards: {
+                        let mut records: Vec<_> = self
+                            .pair_boards
+                            .iter()
+                            .map(|(&(code, index), board)| (code, index, board.clone()))
+                            .collect();
+                        records.sort_by_key(|(code, index, _)| (*code, *index));
+                        records
+                    },
                     boards_entered: self
                         .boards_entered
                         .and_then(|index| self.entries.get(index))
@@ -3042,6 +3121,9 @@ impl Navigator {
         nav.altitude = save.altitude;
         nav.docked = save.docked;
         nav.legal = save.legal;
+        nav.offended = save
+            .offended
+            .filter(|index| nav.bodies.get(*index).is_some());
         nav.ship_lock = save.ship_lock;
         nav.missile_lock = save.missile_lock;
         nav.missile_view = save.missile_view;
@@ -3172,6 +3254,11 @@ impl Navigator {
                 .collect();
             nav.boards = saved
                 .boards
+                .iter()
+                .map(|(code, index, board)| ((*code, *index), board.clone()))
+                .collect();
+            nav.pair_boards = saved
+                .pair_boards
                 .iter()
                 .map(|(code, index, board)| ((*code, *index), board.clone()))
                 .collect();
@@ -3416,15 +3503,34 @@ impl Navigator {
     }
 
     /// The game day of the clock (the original's day counter, counted from the
-    /// new game's start so a new game's market drifts from day 0).
+    /// new game's start so a new game's market drifts from day 0). The day
+    /// changes at midnight, as `DATA_008807` does when the day fraction wraps:
+    /// a new game starts at noon, so day 1 begins twelve hours in (PAR-17).
     pub fn day(&self) -> u32 {
-        (self.elapsed().max(0.0) / 86_400.0) as u32
+        let phase = self.start_clock.max(0.0).rem_euclid(86_400.0);
+        ((phase + self.elapsed().max(0.0)) / 86_400.0) as u32
     }
 
     /// The console's date and time for this navigator's clock: the calendar counts
     /// from 1 Jan 3250, noon, not from the absolute day counter (`0x121cf7.5`).
     pub fn date_text(&self) -> String {
         crate::galaxy_map::date_text(self.elapsed())
+    }
+
+    /// The same date and time for another game clock (the system map's time point).
+    pub fn date_at(&self, clock: f64) -> String {
+        crate::galaxy_map::date_text(clock - self.start_clock)
+    }
+
+    /// This system's bodies as F880/F866 place them at `clock` (the system map's
+    /// time point), in the order of [`Self::bodies`].
+    pub fn bodies_at(&self, cache: &VerifiedCache, clock: f64) -> Result<Vec<Body>, String> {
+        bodies_since(
+            cache,
+            &self.entries[self.current],
+            clock_words(self.world_epoch),
+            clock_words(clock),
+        )
     }
 
     /// The per-commodity flags of this system's stock string (F870): supply class, price
@@ -3806,7 +3912,11 @@ impl Navigator {
             return None;
         }
         self.docked.or_else(|| self.landed_body())?;
-        self.legal.record(npc::SMUGGLING, Some(self.jurisdiction))
+        let report = self.legal.record(npc::SMUGGLING, Some(self.jurisdiction));
+        if report.is_some() {
+            self.mark_offended_here();
+        }
+        report
     }
 
     /// The system list as the bulletin's destination picker sees it: the
@@ -4002,6 +4112,7 @@ impl Navigator {
                     offers.day = day;
                 }
             }
+            self.pair_daily(cache, day);
             self.expire(day, &mut tick);
             ticks.push(tick);
         }
@@ -4797,7 +4908,8 @@ impl Navigator {
             None
         };
         let spawned = if let Some(plan) = planned {
-            let police = (!system.new_game && details.bytes[2] > 0).then_some(allegiance);
+            // F688 draws no police and nothing but F238 spawns one: no patrol.
+            let police: Option<u32> = None;
             npc::spawn_plan(player, &anchors, &plan, police, |model| {
                 crate::ships::npc_spec(cache, model)
             })
@@ -4914,6 +5026,7 @@ impl Navigator {
         let mut rng = self.random;
         let mut remembered = self.bbs_remembered;
         self.boards.retain(|key, _| key.0 != code);
+        self.pair_boards.retain(|key, _| key.0 != code);
         for &index in &places {
             for _ in 0..99 {
                 rng.advance();
@@ -4938,6 +5051,7 @@ impl Navigator {
                 sectors: &sectors,
             };
             let board = bbs::generate_place(&ctx, &mut remembered, &mut rng);
+            self.pair_boards.insert((code, index), board.clone());
             self.boards.insert((code, index), board);
         }
         // F871's control of the system and the player's two ranks (zero until
@@ -4969,6 +5083,102 @@ impl Navigator {
         self.random = rng;
     }
 
+    /// F633's working copy of the current system's boards, for the draw ledger
+    /// tests.
+    pub fn pair_boards(&self) -> impl Iterator<Item = (&(u32, usize), &ffe_core::bbs::Board)> {
+        self.pair_boards.iter()
+    }
+
+    /// F633 on the shared pair for one new day, in the original's draw order:
+    /// the job list's dated entries and three news chances, then for every
+    /// place of the system 99 market steps, the board replacement and the
+    /// ship queue. The places' own markets and visited boards still change
+    /// from their own streams (EXP-006), so those 99 steps are consumed, not
+    /// read, as in [`Self::generate_boards`]; the pair, the job list and the
+    /// boards of places not yet visited follow the original.
+    fn pair_daily(&mut self, cache: &VerifiedCache, day: u32) {
+        use ffe_core::bbs;
+        if self.boards_entered != Some(self.current) {
+            return;
+        }
+        let Some(blob) = cache.asset("base:world/system-tables") else {
+            return;
+        };
+        let (Ok(galaxy), Some(sector_blob)) =
+            (Tables::new(blob), cache.asset("base:world/galaxy-tables"))
+        else {
+            return;
+        };
+        let Ok(sectors) = ffe_core::sector::Tables::new(sector_blob) else {
+            return;
+        };
+        let code = self.entries[self.current].params.code;
+        let market = galaxy.market(code);
+        let details = galaxy.details(code);
+        let places: Vec<usize> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, body)| body.kind.is_place())
+            .map(|(index, _)| index)
+            .collect();
+        let reference_empty: &[u32] = if std::env::var_os("FFE_REFERENCE_GALAXY").is_some() {
+            &bbs::REFERENCE_EMPTY
+        } else {
+            &[]
+        };
+        let absolute = day + 0x0012_1cf7;
+        let mut rng = self.random;
+        let mut remembered = self.bbs_remembered;
+        let control = galaxy.control(code, [0, 0]);
+        let none = [ffe_core::market::Entry::default(); ffe_core::market::GOODS];
+        macro_rules! context {
+            ($entries:expr, $seed:expr) => {
+                bbs::Context {
+                    code,
+                    population: market.population,
+                    danger: market.danger as i32,
+                    allegiance: details.allegiance >> 6,
+                    stock: &market.stock,
+                    market: $entries,
+                    day: absolute,
+                    object_seed: $seed,
+                    places: places.len() as u32,
+                    patrol: details.bytes[1],
+                    trade: details.bytes[3],
+                    empty: reference_empty,
+                    galaxy: &galaxy,
+                    sectors: &sectors,
+                }
+            };
+        }
+        let mut jobs = std::mem::take(&mut self.bbs_jobs);
+        bbs::daily_jobs(
+            &mut jobs,
+            &context!(&none, 0),
+            &mut rng,
+            control.maximum,
+            control.major_rank.saturating_sub(control.minor_rank),
+        );
+        self.bbs_jobs = jobs;
+        for &index in &places {
+            for _ in 0..99 {
+                rng.advance();
+            }
+            let Ok(entries) = self.peek_market(cache, index) else {
+                continue;
+            };
+            let ctx = context!(&entries, self.bodies[index].seed);
+            let board = self.pair_boards.entry((code, index)).or_default();
+            bbs::daily_place(board, &ctx, &mut remembered, &mut rng);
+            if let Some(unvisited) = self.boards.get_mut(&(code, index)) {
+                *unvisited = board.clone();
+            }
+        }
+        self.bbs_remembered = remembered;
+        self.random = rng;
+    }
+
     /// F688's ships as the original draws them (`ffe_core::spawn`): the counts
     /// and every ship's model, role, place and destination, from the shared
     /// pair. `thargoids` is F35(0x16)'s limit. The bays are counted against each
@@ -4979,6 +5189,49 @@ impl Navigator {
         thargoids: usize,
         rng: &mut npc::Random,
     ) -> Option<Vec<ffe_core::spawn::Spawned>> {
+        use ffe_core::spawn;
+        self.with_spawn_world(cache, |world, places| {
+            let details = world.galaxy.details(world.code);
+            let mut used = vec![0u32; places.len()];
+            if let Some(docked) = self.docked {
+                if let Some(k) = places.iter().position(|index| *index == docked) {
+                    used[k] = 1;
+                }
+            }
+            let bays: Vec<u32> = places
+                .iter()
+                .map(|index| u32::from(self.bodies[*index].bays))
+                .collect();
+            let (_, plan) = spawn::run(
+                world,
+                details.bytes[1],
+                details.bytes[3],
+                u32::try_from(thargoids).unwrap_or(u32::MAX),
+                false,
+                rng,
+                &mut |place| {
+                    let k = place as usize;
+                    // F650 numbers a station's bays 0..=bays.
+                    if used[k] <= bays[k] {
+                        used[k] += 1;
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
+            plan
+        })
+    }
+
+    /// The world F772-F776 draw from (`ffe_core::spawn::World`): the system's
+    /// tables, the places in the original's order and the ship statistics. `f`
+    /// gets it with the body index of each place.
+    fn with_spawn_world<R>(
+        &self,
+        cache: &VerifiedCache,
+        f: impl FnOnce(&ffe_core::spawn::World<'_>, &[usize]) -> R,
+    ) -> Option<R> {
         use ffe_core::spawn;
         let galaxy = Tables::new(cache.asset("base:world/system-tables")?).ok()?;
         let sectors =
@@ -5035,35 +5288,7 @@ impl Navigator {
             hull: &hull,
             empty: reference_empty,
         };
-        let mut used = vec![0u32; places.len()];
-        if let Some(docked) = self.docked {
-            if let Some(k) = places.iter().position(|index| *index == docked) {
-                used[k] = 1;
-            }
-        }
-        let bays: Vec<u32> = places
-            .iter()
-            .map(|index| u32::from(self.bodies[*index].bays))
-            .collect();
-        let (_, plan) = spawn::run(
-            &world,
-            details.bytes[1],
-            details.bytes[3],
-            u32::try_from(thargoids).unwrap_or(u32::MAX),
-            false,
-            rng,
-            &mut |place| {
-                let k = place as usize;
-                // F650 numbers a station's bays 0..=bays.
-                if used[k] <= bays[k] {
-                    used[k] += 1;
-                    true
-                } else {
-                    false
-                }
-            },
-        );
-        Some(plan)
+        Some(f(&world, &places))
     }
 
     /// F691/F650: give every initial station-bay ship its bay and start F747's
@@ -5201,6 +5426,8 @@ impl Navigator {
         player_radius: i64,
     ) -> Vec<ShipEvent> {
         self.player_at = player;
+        let was_wanted = self.legal.wanted;
+        self.tick_police(tics);
         let mut events = std::mem::take(&mut self.script_events);
         // The port holds hostile fire and missiles while the player is docked,
         // on a pad or landed (see F931 below).
@@ -5296,15 +5523,14 @@ impl Navigator {
             self.apply_dock_request(request);
         }
         self.keep_ships_out_of_worlds();
-        // The police respond to a wanted player (the port's reconstruction of
-        // DATA_008647; F783 clears the alert when the chase ends).
-        if self.legal.wanted {
-            for ship in &mut self.ships {
-                if ship.provoke() {
-                    events.push(ShipEvent::PoliceHostile {
-                        name: ship.name.clone(),
-                    });
-                }
+        // F238's police (F748): a ship launched in state 0x22 attacks once the
+        // starport's door has opened. Nothing else makes police hostile when the
+        // player is wanted; F783 clears the chase when one is removed.
+        for ship in &mut self.ships {
+            if ship.take_turned() {
+                events.push(ShipEvent::PoliceHostile {
+                    name: ship.name.clone(),
+                });
             }
         }
         // F931: every hostile ship with a laser fires at the player's box,
@@ -5382,6 +5608,13 @@ impl Navigator {
         self.ships.retain(|ship| !ship.finished(player));
         if police_removed && self.legal.clear_alert() {
             events.push(ShipEvent::AlertCleared);
+        }
+        // The police stop attacking the frame the wanted bit clears, whether F783 or
+        // F238 (no police left) cleared it.
+        if was_wanted && !self.legal.wanted {
+            for ship in &mut self.ships {
+                ship.stand_down();
+            }
         }
         if self.ship_lock.is_some_and(|id| {
             !self
@@ -5546,6 +5779,136 @@ impl Navigator {
         starport_witness(&self.bodies, at)
     }
 
+    /// The body index of the `ordinal`th starport, in [`starport_witness`]'s numbering.
+    fn starport_body(&self, ordinal: usize) -> Option<usize> {
+        self.bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, body)| body.kind == Kind::Starport)
+            .nth(ordinal)
+            .map(|(index, _)| index)
+    }
+
+    /// F236's `[DATA_008804+0x50dc] = F234(..)`: remember the starport that
+    /// witnessed an offence at `at`. F238 and F240 act on that starport's record.
+    pub fn mark_offended(&mut self, at: [i64; 3]) {
+        if let Some(index) = self
+            .starport_in_range(at)
+            .and_then(|ordinal| self.starport_body(ordinal))
+        {
+            self.offended = Some(index);
+        }
+    }
+
+    /// F236's other form (`[DATA_008804+0x50dc] = arg`): an offence made in a station
+    /// or on a pad is witnessed by that station.
+    fn mark_offended_here(&mut self) {
+        if let Some(index) = self.docked.or_else(|| self.landed_body()) {
+            self.offended = Some(index);
+        }
+    }
+
+    /// F240 every frame and F238 once per whole game day (`0xc22e` tics, F152's
+    /// event 10) on the offended starport's record (`ffe_core::police`). F238's
+    /// launches wait in [`Self::spawn_police`], which has the content cache.
+    fn tick_police(&mut self, tics: u32) {
+        // F152's marker runs from the start of the game whether or not anyone has offended,
+        // so the day F238 runs on has a fixed phase, not one that starts at the offence.
+        self.police_clock = self.police_clock.saturating_add(tics);
+        let day = self.police_clock >= npc::THINK_TICS;
+        if day {
+            self.police_clock %= npc::THINK_TICS;
+        }
+        let Some(index) = self.offended else {
+            return;
+        };
+        let Some(body) = self.bodies.get(index) else {
+            return;
+        };
+        let (law, bays) = (body.open_air, body.bays);
+        let port = self
+            .traffic
+            .entry(index)
+            .or_insert_with(|| Starport::new(bays));
+        let mut chase = self.legal.chase;
+        ffe_core::police::frame(port, &mut chase, tics);
+        if day {
+            let mut wanted = self.legal.wanted;
+            for launch in
+                ffe_core::police::day(port, law, &mut chase, &mut wanted, PLAYER, &mut self.random)
+            {
+                self.police_launches.push((index, launch));
+            }
+            self.legal.wanted = wanted;
+        }
+        self.legal.set_chase(chase);
+    }
+
+    /// F239 for the launches F238 queued: F772(0xe) makes the police ship
+    /// (`ffe_core::spawn::create`, the shared pair's draws) and F659/F239 put it in
+    /// the offended starport. A ship that cannot be made gives its count back.
+    pub fn spawn_police(&mut self, cache: &VerifiedCache) {
+        let launches = std::mem::take(&mut self.police_launches);
+        for (index, launch) in launches {
+            if !self.make_police(cache, index, launch) {
+                if let Some(port) = self.traffic.get_mut(&index) {
+                    ffe_core::police::give_back(port);
+                }
+            }
+        }
+    }
+
+    fn make_police(
+        &mut self,
+        cache: &VerifiedCache,
+        index: usize,
+        launch: ffe_core::police::Launch,
+    ) -> bool {
+        use ffe_core::police::{ATTACK, POLICE_TYPE};
+        let mut rng = self.random;
+        let Some(Some(outfit)) = self.with_spawn_world(cache, |world, _| {
+            ffe_core::spawn::create(POLICE_TYPE, world, &mut rng)
+        }) else {
+            return false;
+        };
+        self.random = rng;
+        let Some(mut spec) = crate::ships::npc_spec(cache, outfit.model) else {
+            return false;
+        };
+        spec.model = outfit.model;
+        let id = self.ships.iter().map(|ship| ship.id + 1).max().unwrap_or(0);
+        let type_name = spec.name.clone();
+        spec.name = format!("{} {}", spec.name, id + 1);
+        let Some(body) = self.bodies.get(index) else {
+            return false;
+        };
+        let position = body.position;
+        let radius = body.radius as f64;
+        let mut ship_rng = npc::Random::new(
+            outfit.seed ^ 0x504f_4c49,
+            id.wrapping_add(u32::from(launch.index) + 1)
+                .wrapping_mul(0x9e37_79b9),
+        );
+        let mut ship = NpcShip::new(&spec, npc::Role::Police, position, position, &mut ship_rng);
+        ship.type_name = type_name;
+        ship.id = id;
+        ship.station = Some(index);
+        ship.orbit_radius = radius;
+        if launch.state == ATTACK {
+            // F238's open-air roll: the ship goes straight to state 1.
+            ship.hostile = true;
+            ship.responding = true;
+            ship.state = npc::State::Attack;
+            ship.station = None;
+        } else {
+            // State 0x22: inside the starport until its door opens (F748).
+            ship.state = npc::State::Launch;
+            ship.scrambled = true;
+        }
+        self.ships.push(ship);
+        true
+    }
+
     /// The ordinal of the starport nearest `body` among the system's starports
     /// (`DATA_008996` is F236's ledger index; a station uses its nearest
     /// starport).
@@ -5582,10 +5945,12 @@ impl Navigator {
         let mut messages = Vec::new();
         if let Some(report) = self.legal.record(npc::LAUNCHING_WITHOUT_CLEARANCE, here) {
             messages.push(report.message);
+            self.mark_offended_here();
         }
         if self.legal.owed(here) > 0x1388 {
             if let Some(report) = self.legal.record(npc::EVADING_FINE, here) {
                 messages.push(report.message);
+                self.mark_offended_here();
             }
         }
         messages.retain(|m| !m.is_empty());
@@ -5629,16 +5994,12 @@ impl Navigator {
         let offence = self
             .legal
             .player_fired(witness.map(|_| self.jurisdiction))?;
-        let mut police = false;
-        if self.legal.wanted {
-            for ship in &mut self.ships {
-                police |= ship.provoke();
-            }
-        }
-        if police {
-            self.legal.alert = true;
-        }
-        Some(LegalReport { offence, police })
+        // F236 remembers the witness; F238 sends the police from its starport.
+        self.mark_offended(at);
+        Some(LegalReport {
+            offence,
+            police: false,
+        })
     }
 
     /// The player's laser hit on an NPC ship: F953/F942 plus the legal
@@ -5658,16 +6019,18 @@ impl Navigator {
         if crime {
             self.legal.wanted = true;
             self.legal.offences += 1;
+            let at = self.player_at;
+            self.mark_offended(at);
         }
         // F942 adds the destroyed ship's statistics +0x16 to DATA_008911 and
         // prints the Elite Federation notice when the rating word changes.
         let rating_changed = destroyed && self.career.award_kill(rating);
-        let mut police = false;
-        if self.legal.wanted {
-            for ship in &mut self.ships {
-                police |= ship.provoke();
-            }
-        }
+        // Only the ship that was shot answers; F238 sends the rest.
+        let police = self
+            .ships
+            .iter_mut()
+            .find(|ship| ship.id == id)
+            .is_some_and(|ship| ship.provoke());
         if destroyed {
             if let (Some(station), true) = (station, held_bay) {
                 // F788: a destroyed ship releases its bay.
@@ -6650,6 +7013,9 @@ impl Navigator {
         // on a system entry so the offence can happen once per system, as the
         // FFED3D once-per-system check intends.
         self.legal.illegal_fire = false;
+        // The offended starport and F238's pending launches belong to the old system.
+        self.offended = None;
+        self.police_launches.clear();
         self.missile_lock = None;
         self.destination = None;
         self.altitude = i32::MAX;
@@ -6666,6 +7032,7 @@ impl Navigator {
         self.saved_markets.clear();
         self.offers.clear();
         self.boards.clear();
+        self.pair_boards.clear();
         self.bbs_jobs.clear();
         self.boards_entered = None;
         self.sequence = None;
@@ -6754,10 +7121,15 @@ impl Navigator {
     /// action 0xd1+n stores the object's number in the player's target byte `+0xec`
     /// (ffe.asm 78362-78376); the port's `locked` is that target.
     pub fn engage(&mut self) -> Option<&Body> {
-        if self.landed_view() || self.sequence.is_some() {
+        let index = self.selected_body()?;
+        self.engage_body(index)
+    }
+
+    /// [`Self::engage`] for a body picked another way (a click on the system map).
+    pub fn engage_body(&mut self, index: usize) -> Option<&Body> {
+        if self.landed_view() || self.sequence.is_some() || index >= self.bodies.len() {
             return None;
         }
-        let index = self.selected_body()?;
         self.target = Some(index);
         self.ship_target = None;
         self.autopilot_notice = None;
@@ -7044,7 +7416,11 @@ impl Navigator {
             [0; 3]
         };
         // F742 hands F610 the ship's `+0x101`; F746's final leg is the constant -2.
-        let modifier = if self.final_leg { -2 } else { flight.ai_modifier() };
+        let modifier = if self.final_leg {
+            -2
+        } else {
+            flight.ai_modifier()
+        };
         let mut guidance = if station {
             flight.guidance(point, velocity, modifier)
         } else {
@@ -7686,6 +8062,7 @@ mod tests {
             temperature: 0,
             size_word: 0,
             parent_frame: None,
+            orbit_centre: None,
         }
     }
 

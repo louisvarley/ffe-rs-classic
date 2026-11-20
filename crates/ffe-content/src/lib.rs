@@ -172,6 +172,13 @@ pub enum AssetKind {
     DotTables {
         source_offset: u64,
     },
+    /// What F1680/F1700 need to draw a far object as a dot (v35): the dot sprite records, the
+    /// size map and each model's far class, dot class and colour; see
+    /// `ffe_core::model_dot::ObjectDotTables`.
+    ObjectDotTables {
+        models: u32,
+        source_offset: u64,
+    },
     /// Per model table slot, the 20-byte record of the descriptor fields object
     /// set-up reads (scales, radii, shape and statistics flags; v16); see
     /// `ffe_convert::embedded::decode_model_record`.
@@ -319,7 +326,7 @@ const MODEL_TABLE_SLOTS: u32 = 466;
 pub const SHIP_STATS_BYTES: usize = 48;
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
-    if manifest.format != "ffe-content-cache" || !matches!(manifest.format_version, 1..=34) {
+    if manifest.format != "ffe-content-cache" || !matches!(manifest.format_version, 1..=35) {
         return Err("unsupported content cache format/version".to_owned());
     }
     if manifest.complete_game_assets || manifest.unresolved.is_empty() {
@@ -437,6 +444,10 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
         }
         if manifest.format_version < 34 && matches!(record.asset, AssetKind::ScriptQueries { .. }) {
             return Err("The script query names require cache v34.".to_owned());
+        }
+        if manifest.format_version < 35 && matches!(record.asset, AssetKind::ObjectDotTables { .. })
+        {
+            return Err("The object dot tables require cache v35.".to_owned());
         }
         if manifest.format_version < 22 && matches!(record.asset, AssetKind::SystemStrings { .. }) {
             return Err("The system strings require cache v22.".to_owned());
@@ -803,6 +814,18 @@ fn validate_payload(record: &CacheFile, bytes: &[u8]) -> Result<(), String> {
         }
         AssetKind::DotTables { .. } => {
             ffe_core::model_dot::DotTables::new(bytes)?;
+        }
+        AssetKind::ObjectDotTables { models, .. } => {
+            let tables = ffe_core::model_dot::ObjectDotTables::new(bytes)?;
+            let expected = ffe_core::model_dot::OBJECT_TABLE_BYTES
+                + *models as usize * ffe_core::model_dot::OBJECT_MODEL_BYTES;
+            if bytes.len() != expected {
+                return Err(format!(
+                    "object dot tables hold {} bytes, not {expected}",
+                    bytes.len()
+                ));
+            }
+            let _ = tables;
         }
         AssetKind::IntroStrings { count, .. } => {
             let mut split = bytes.split(|byte| *byte == 0);

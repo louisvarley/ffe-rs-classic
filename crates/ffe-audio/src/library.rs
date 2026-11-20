@@ -308,26 +308,31 @@ impl MusicLibrary {
 
     /// Read and parse one song, preferring the cache payload when present.
     pub fn load(&self, index: usize) -> Result<HmpSong, AudioError> {
+        let bytes = self.source_bytes(index)?;
+        let path = if self.cached.contains_key(&index) {
+            PathBuf::from(format!(
+                "<cache:base:music:{}>",
+                Self::name(index).unwrap_or("song")
+            ))
+        } else {
+            self.path_for(index).unwrap_or_default()
+        };
+        HmpSong::parse(&bytes).map_err(|source| AudioError::Hmp { path, source })
+    }
+
+    /// Read the original HMP bytes, preferring the verified cache payload.
+    /// The first-run audio renderer uses these bytes for its cache key.
+    pub fn source_bytes(&self, index: usize) -> Result<Vec<u8>, AudioError> {
         if index >= SONG_COUNT {
             return Err(AudioError::SongOutOfRange(index));
         }
         if let Some(bytes) = self.cached.get(&index) {
-            return HmpSong::parse(bytes).map_err(|source| AudioError::Hmp {
-                path: PathBuf::from(format!(
-                    "<cache:base:music/{}>",
-                    Self::name(index).unwrap_or("song")
-                )),
-                source,
-            });
+            return Ok(bytes.clone());
         }
         let path = self
             .path_for(index)
             .ok_or(AudioError::SongMissing { index, path: None })?;
-        let bytes = std::fs::read(&path).map_err(|source| AudioError::SongIo {
-            path: path.clone(),
-            source,
-        })?;
-        HmpSong::parse(&bytes).map_err(|source| AudioError::Hmp {
+        std::fs::read(&path).map_err(|source| AudioError::SongIo {
             path: path.clone(),
             source,
         })

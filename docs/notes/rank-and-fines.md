@@ -32,7 +32,7 @@ decoded from JJFFE 2.8a7 (`jjffe-master/ffe.asm`, `ffedat.asm`), not invented.
 | Pay fine | F544 (`ffe.asm:35028`): `cash -= fine`, clear the slot, `DATA_005984` success row, then `DATA_005983`'s "Hang up." |
 | Refusal | F545 (`ffe.asm:35077`): `DATA_005985` "You've until midnight to pay ... or be put in jail..." and the fine remains. |
 | Short messages | F366 (`ffe.asm:27854`): `DATA_005990` "You don't have enough cash." / `DATA_005991` "Fine paid by remote transfer." |
-| Police spawn response | F238/F239 (`ffe.asm:18939`, `19041`); the port still only provokes existing police/military traffic (F783 clears the alert). |
+| Police spawn response | F238/F239/F240 (`ffe.asm:18939`, `19041`, `19134`): ported 2026-11-19 in `ffe_core::police` and replayed against the executed original (`legal.md`); F783 clears the alert. |
 
 ### The ledger index is the system allegiance, not a starport ordinal
 
@@ -141,10 +141,9 @@ witness/range test only.
   the limit; Jettison is F291, one tonne out as a drifting model-0x99
   canister behind the ship, refused with `0x9c30` unless in free flight.
   The canister cannot be scooped back yet.
-- **Police spawns.** F238/F239's extra police objects still need F927's slot
-  allocator and the F239 object template. The port provokes every existing
-  police/military ship and sets `alert`; it does not spawn a new patrol. This is
-  the one remaining item of the original's police response.
+- **Police spawns.** Ported 2026-11-19 (`ffe_core::police`, `legal.md`): F238
+  launches police from the offended starport. What is left is F659's exact launch
+  geometry and the port's own non-original patrol.
 - **Military awards.** F300/F301's mission rewards are not ported (mission
   completion is still absent), so `Career::award_federal/imperial` has tests but
   no live caller yet. The mission layer should call it when it lands.

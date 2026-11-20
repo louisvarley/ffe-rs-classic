@@ -173,6 +173,13 @@ pub struct Flight {
     /// The player's name (`+0x124`) as a script set it (statements 26/47).
     #[serde(default)]
     pub script_name: Option<String>,
+    /// The integer flight model's own words (rates, sub-unit fractions, caps,
+    /// thrust, drift, the scanner and the like) as `OriginalFlight::apply` last
+    /// wrote them, so a resume continues the same integer state instead of one
+    /// rebuilt from the floating-point view above (PAR-18). Ignored on load
+    /// when the position, velocity or rows no longer match what it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<crate::original_flight::ResumeState>,
 }
 
 fn default_rng() -> Random {
@@ -229,6 +236,7 @@ impl Default for Flight {
             script_actions: Vec::new(),
             script_seed: 0,
             script_name: None,
+            resume: None,
         }
     }
 }
@@ -319,7 +327,8 @@ impl Flight {
         if self.death.is_some() {
             return Err("save was made after the ship's destruction".to_owned());
         }
-        if self.mode == Mode::Docked && !self.system_flight
+        if self.mode == Mode::Docked
+            && !self.system_flight
             && (self.velocity != [0.0; 3]
                 || self.position != [0.0, 0.0, -60.0]
                 || self.docking_requested)
@@ -868,7 +877,10 @@ impl Flight {
         self.damage.service_counters[0] = self.damage.service_counters[0].wrapping_sub(1);
         self.damage.service_counters[1] = self.damage.service_counters[1].wrapping_sub(1);
         if self.rng.advance() & 0xff > self.damage.service_counters[0] {
-            if let Some(bit) = self.damage.break_equipment(&mut self.loadout.general, &mut self.rng) {
+            if let Some(bit) = self
+                .damage
+                .break_equipment(&mut self.loadout.general, &mut self.rng)
+            {
                 return vec![SystemEvent::EquipmentFailure(bit)];
             }
         }
@@ -881,8 +893,16 @@ impl Flight {
 
     /// F1007's mode-independent event-6 work. The active module may be a map,
     /// station, or parked view; only the source mode-2 branch suppresses F938.
-    pub fn player_events(&mut self, seconds: u32, mode: u8, stats: &crate::ships::ShipStats, thrust: i32) -> (Vec<SystemEvent>, bool) {
-        if seconds == 0 { return (Vec::new(), false); }
+    pub fn player_events(
+        &mut self,
+        seconds: u32,
+        mode: u8,
+        stats: &crate::ships::ShipStats,
+        thrust: i32,
+    ) -> (Vec<SystemEvent>, bool) {
+        if seconds == 0 {
+            return (Vec::new(), false);
+        }
         self.hull_display = self.hull_display.saturating_sub(seconds & 0xffff);
         self.hull_heat = crate::damage::cool(self.hull_heat, seconds, self.heat_shielded());
         let failures = self.service_events(seconds);

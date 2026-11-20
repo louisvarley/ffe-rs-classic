@@ -61,7 +61,7 @@ COMBAT_TESTS = {
     "the_type_1_ross_154_hull_still_carries_its_front_pulse_laser",
     "target_damage_readout_draws_f1099s_text",
     "target_lock_uses_f1100s_green_and_three_decimal_au",
-    "beam_is_model_156_at_the_gun_only_where_it_is_in_front",
+    "f1776_model_156_draws_in_front_and_external_cameras",
 }
 LASER_TESTS = {
     "a_60hz_pulse_sequence_aims_fires_and_damages_an_npc",

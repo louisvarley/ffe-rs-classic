@@ -232,13 +232,18 @@ fn rotate(v1: [f64; 3], v2: [f64; 3], angle: u16) -> ([f64; 3], [f64; 3]) {
     )
 }
 
-/// The axes of a mount: the ship's for front and rear (rear is a half turn
-/// about up), the turret's for the two turret mounts (FUNC_001513 by
-/// `+0x204`/`+0x206`, as the camera and F1776 do).
+/// The axes F1776 draws the beam with, and the direction F931 fires along
+/// (the third row): the ship's for front, rear and external, the turret's for
+/// the two turret mounts (FUNC_001513 by `+0x204`/`+0x206`, as the camera and
+/// F1776 do).
+///
+/// F931 and F1776 negate only the forward row for the rear mount
+/// (`ffe.asm:111376-111378`), not the right row as the rear camera does (F1054
+/// negates A and C), so the drawn basis is mirrored.
 pub fn mount_axes(state: &Flight, view_mode: ViewMode, turret: [i16; 2]) -> [[f64; 3]; 3] {
     let [right, up, forward] = camera::ship_axes(state);
     match view_mode {
-        ViewMode::Rear => [right.map(|v| -v), up, forward.map(|v| -v)],
+        ViewMode::Rear => [right, up, forward.map(|v| -v)],
         ViewMode::TopTurret | ViewMode::BottomTurret => {
             let (forward, right) = rotate(forward, right, turret[0] as u16);
             let (up, forward) = rotate(up, forward, turret[1] as u16);
@@ -251,12 +256,15 @@ pub fn mount_axes(state: &Flight, view_mode: ViewMode, turret: [i16; 2]) -> [[f6
 /// The gun's position in flight units. F931/F1776 place it at
 /// `forward * zoff + up * yoff`, each word in eighths of an original position
 /// unit; the ship statistics give the mount's two words.
-pub fn gun_origin(
-    state: &Flight,
-    stats: Option<&ShipStats>,
-    view_mode: ViewMode,
-    axes: [[f64; 3]; 3],
-) -> [f64; 3] {
+///
+/// The rows are the *ship's own*, for every mount. F931 and F1776 work the
+/// position out before they turn the rows for a turret, so a turret's gun stays
+/// at its mount on the hull while only the aim swings. For the rear mount F1776
+/// negates both the forward row and the word (`ffe.asm:111374-111378`) and F931
+/// uses neither negated, so the position is `+forward * word` in both: the
+/// rear gun word is not a distance behind the centre.
+pub fn gun_origin(state: &Flight, stats: Option<&ShipStats>, view_mode: ViewMode) -> [f64; 3] {
+    let [_, up, forward] = camera::ship_axes(state);
     let words = stats.map_or([0, 0], |stats| match view_mode {
         // The missile view fires nothing (F1040); the front gun is only a
         // harmless placeholder for a caller that asks for a gun origin here.
@@ -270,7 +278,7 @@ pub fn gun_origin(
     // The original's `axis * word * 8 >> 12` (the Q31 row's high word is Q15).
     let scale = 8.0 / UNITS_PER_FLIGHT_UNIT;
     let [along, above] = words.map(|word| f64::from(word) * scale);
-    std::array::from_fn(|i| state.position[i] + axes[2][i] * along + axes[1][i] * above)
+    std::array::from_fn(|i| state.position[i] + forward[i] * along + up[i] * above)
 }
 
 /// The beam for a shot, ready for `Screen`.
@@ -282,7 +290,7 @@ pub fn beam(
 ) -> LaserBeam {
     let axes = mount_axes(state, view_mode, turret);
     LaserBeam {
-        origin: gun_origin(state, stats, view_mode, axes),
+        origin: gun_origin(state, stats, view_mode),
         axes,
         mount: mount(view_mode).unwrap_or(0),
         length: MISS_LENGTH,
@@ -489,15 +497,19 @@ mod tests {
         word(&mut block, 0x2c, 64);
         word(&mut block, 0x2e, 34);
         let stats = ShipStats::from_block(&block).unwrap();
-        let axes = mount_axes(&state, ViewMode::Front, [0, 0]);
-        let origin = gun_origin(&state, Some(&stats), ViewMode::Front, axes);
+        let origin = gun_origin(&state, Some(&stats), ViewMode::Front);
         let along = 1300.0 * 8.0 / UNITS_PER_FLIGHT_UNIT;
         assert!((origin[2] - along).abs() < 1e-12, "{origin:?}");
         assert!((origin[0]).abs() < 1e-12 && (origin[1]).abs() < 1e-12);
-        // Rear is behind, front of a half-turned ship.
-        let rear = mount_axes(&state, ViewMode::Rear, [0, 0]);
-        let behind = gun_origin(&state, Some(&stats), ViewMode::Rear, rear);
-        assert!((behind[2] + 800.0 * 8.0 / UNITS_PER_FLIGHT_UNIT).abs() < 1e-12);
+        // F931 and F1776 negate the rear gun word and the forward row together
+        // (`ffe.asm:111374-111378`), so the position is +forward * word: ahead of
+        // the centre, with the ray going backwards.
+        let rear = gun_origin(&state, Some(&stats), ViewMode::Rear);
+        assert!((rear[2] - 800.0 * 8.0 / UNITS_PER_FLIGHT_UNIT).abs() < 1e-12);
+        assert_eq!(
+            mount_axes(&state, ViewMode::Rear, [0, 0])[2],
+            [0.0, 0.0, -1.0]
+        );
     }
 
     #[test]

@@ -264,7 +264,9 @@ fn executed_reference_object_instances() {
                             check_screen(screen);
                             counts[1] += 1;
                         }
-                        Draw::Dot { distance, screen } => {
+                        Draw::Dot {
+                            distance, screen, ..
+                        } => {
                             assert_eq!(outcome, 2, "{label} dot");
                             assert_eq!(int(&object["distance"]), i64::from(distance), "{label}");
                             check_screen(screen);

@@ -320,10 +320,14 @@ fn every_view_fires_its_own_mount_along_its_own_axis() {
     let (origin, direction) = gun_mm(&state, ViewMode::Front, [0, 0]);
     assert_eq!(origin[2], 10_400);
     assert_eq!(direction, [0.0, 0.0, 1.0]);
-    // Rear: F931 negates the forward axis and uses the rear gun word, so the
-    // ray leaves from 800/8 = 6400 mm behind the centre towards -z.
+    // Rear: F931 aims along the negated forward row but multiplies the rear gun
+    // word by the *un*negated one (`ffe.asm:69612-69638`, F1776 negates the word
+    // and the row together, `:111374-111378`), so the ray leaves from
+    // 800/8 = 6400 mm *ahead* of the centre and goes towards -z. The rear gun
+    // word is positive in the data (`800` for the Eagle), so this is the
+    // original's own arithmetic.
     let (origin, direction) = gun_mm(&state, ViewMode::Rear, [0, 0]);
-    assert_eq!(origin[2], -6_400);
+    assert_eq!(origin[2], 6_400);
     assert_eq!(direction, [0.0, 0.0, -1.0]);
     let behind = laser::Target {
         index: 1,
@@ -339,12 +343,14 @@ fn every_view_fires_its_own_mount_along_its_own_axis() {
         combat::beam(&state, Some(&eagle_stats()), ViewMode::Front, [0, 0])
     );
     // Turrets use F1038's yaw/pitch axes: a quarter turn puts the top turret's
-    // ray on +x.
+    // ray on +x. The gun stays on its mount: F931 and F1776 work the position
+    // out from the ship's own rows before they turn them for the aim
+    // (`ffe.asm:69702-69727`, `:111397-111441`), so only the direction swings.
     let (origin, direction) = gun_mm(&state, ViewMode::TopTurret, [0x4000, 0]);
     for (actual, expected) in direction.into_iter().zip([1.0, 0.0, 0.0]) {
         assert!((actual - expected).abs() < 1e-12, "{direction:?}");
     }
-    assert_eq!(origin, [288, 240, 0]);
+    assert_eq!(origin, [0, 240, 288]);
     let side = laser::Target {
         index: 2,
         centre: [200_000, 0, 0],

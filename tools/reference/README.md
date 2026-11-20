@@ -205,6 +205,29 @@ nineteen records.
   uninitialised base handedness); read that oracle by its counts (440 compared,
   0 mismatched).
 
+## Test hooks for the reserve, firing, acceleration and descent replays
+
+`--flight` runs also take these environment variables (stderr and stdout stay as above):
+
+| Variable | Effect |
+|---|---|
+| `FFE_RESERVE_DUMP=1` | per frame, on stderr: the reserve `+0x11e`, the laser's refire `+0xe8` and heat `+0xea`, the shield, hull and hull-heat words, the fuel units, F152's marker and the RNG pair |
+| `FFE_ROWS_DUMP=1` | per frame, on stderr: the player's parent, its rotating flag, position in the parent's frame, velocity, rows, thrust words and limits |
+| `FFE_FIRE_FROM` / `FFE_FIRE_TO` | the real F931 on the front mount at the end of every frame in the range (it refuses while the laser counts down, is hot or the reserve is empty) |
+| `FFE_ACCEL_AT=<frame>:<step>,...` | F208's writes at the end of that frame: step 0 is 1x, 1 is 10x, 2 is 100x, 3 is 1000x, 4 is 10000x; steps 1 to 4 pull F152's marker back one event |
+| `FFE_RNG_TRACE=<file>` | with `--flight`: one row per F922 draw and per F1530 draw (`frame seq before_a before_b limit result caller`; limit 0 is F1530) |
+| `FFE_ENGINES_OFF_AT`, `FFE_LIMITS_CUT_AT` | the engines off, and the six thrust limits halved, at the end of that frame |
+| `FFE_PLAYER_TO_PIRATE=<frame>[,<offset>]` | with `--flight` (use `--start-key=0x39`, the Hope default start, which has the nine-ship pirate group): at that frame the player (not the NPC) is put `<offset>` units (default 20,000,000) along z from the first state-4 type-0xfb ship, in its frame and with its velocity, so the original's own AI runs; then one row per pirate-group ship per frame (`ptp`, state, target, velocity, thrust words, position relative to the player, hull) |
+| `FFE_PTP_RAW=1` | with the above: one row per frame (`raw`) with the leader's, its target's and the player's whole 0x152-byte object records as hex (replayed by `crates/ffe-core/tests/npc_pirate_replay.rs`; local only, never commit it) |
+| `FFE_POLICE_TRACE=1` | with `--legal-probe` or `--flight`: every frame from 160, F236's offended object (`DATA_008804+0x50dc`) with `+0xc9` mode, `+0xca` current, `+0xd8` timeout, `+0xdc` police left, `+0xde` clock, `+0x14c` flags and `+0xce` face, the chase and wanted bytes, and every police ship (state, model, position relative to the starport); with `FFE_FIRE_FROM=200 FFE_FIRE_TO=200` (the offence) and `FFE_RNG_TRACE`; replayed by `crates/ffe-core/tests/police_replay.rs` (`--start-key=0x02` Hope, `0x04` an orbital station) |
+| `FFE_FLIGHT_SHIPS=1` | with `--flight`: every 25th frame from 160, one row per live ship object (model, AI state, type, parent, velocity, thrust words, position, target) |
+
+`--flight paddock` (use `--start-key=0x02`) is the planet-pad counterpart of `dock`: the Tab launch, Return and keypad 8 held for
+frames 260 to 299, and at frame 770 the starport the ship left becomes the navigation target and F1020 engages the autopilot,
+which flies the descent to the pad (mode 2 until frame 15,704). The Rust replays that read these traces are in
+`crates/ffe-rs/tests/takeoff_replay.rs` (`FFE_FIRE_TRACE`, `FFE_LONG_TRACE`, `FFE_PAD_POSES` with `FFE_AUTOPILOT_AT`) and
+`crates/ffe-rs/tests/event_replay.rs` (`FFE_ACCEL_TRACE` with `FFE_ACCEL_AT`).
+
 ## Firing in the real game (`--game-frame`)
 
 With `--game-frame <frames> 0xff` (no key), two environment variables script
@@ -215,6 +238,23 @@ prints `+0x151`, the model and its statistics pointer to stderr. Use
 `--start-key=0x02` (Ross 154/Eagle) or `0x39` (Hope/Saker). The final frame is
 `game-frame.bin`; compare a run with and without `FFE_FIRE_AT`
 (`docs/notes/combat.md` §6.2).
+
+**`FFE_FIRE_AT` does not show the beam.** It fires at the end of a frame, and
+JJFFE's "Laser invulnerability" loop at the end of F149 (`ffe.asm:15045`) clears
+the draw flag (`+0x151` bit 1) before F1536 can call F1776, so a pulse shot is
+never drawn (a beam laser has no refire delay and re-fires). To see the beam the
+way a player's key shows it, hold Space through the input path, which runs after
+F149 and before the draw (`docs/KNOWN_ISSUES.md`, "Laser beams"):
+
+| Variable | Effect |
+|---|---|
+| `FFE_SPACE_FROM=<frame>` / `FFE_SPACE_TO=<frame>` | Space held for those frames (one frame if `TO` is absent); the beam is drawn on the frame after |
+| `FFE_LASER_CODE=<code>` | all four laser mounts hold this equipment code from frame 600 (`0x88` pulse, `0xa0` 1MW beam, `0xb3` 20MW, `0xc6` mining, `0xcf` Thargoid) |
+| `FFE_PRINT_E6=1` | frames 698-704: the shot's length word `+0xe6`, the `+0x151` flags, refire, heat, the render shift `+0x7e` and the model |
+
+Example (Eagle, external view F9 is scancode `0x43`, rear F7 `0x41`): `FFE_TAKEOFF=1
+FFE_SPACE_FROM=700 jjffe-smoke.exe --game-frame 702 0x02 0x43` against the same
+run without `FFE_SPACE_FROM`; the pixels that differ are the beam.
 
 ## Mis-jump probe
 

@@ -137,7 +137,7 @@ pub fn export_external(root: &Path, output: &Path) -> Result<ExternalManifest, S
         sound_effects: 0,
         unresolved: vec![
             "Embedded executable images, fonts, palettes, models and gameplay tables are not exported.",
-            "MISSION.DAT decoding and HMP-to-MIDI conversion are not implemented.",
+            "This command does not decode MISSION.DAT or render HMP music: build-data imports the journal and the launcher renders the music (music.bin).",
             "Optional CD companion BMPs and AVI clips are not exported.",
             "This is not data.bin, a complete upscale export, or an installable graphics pack.",
         ],

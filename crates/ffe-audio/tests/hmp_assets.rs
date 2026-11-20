@@ -88,6 +88,45 @@ fn parses_all_seventeen_original_songs() {
 }
 
 #[test]
+fn first_run_renderer_generates_all_seventeen_local_tracks() {
+    let Some(directory) = music_dir() else {
+        eprintln!(
+            "skipping the 17-track render test: set FFE_MUSIC_DIR to the game's MUSIC folder"
+        );
+        return;
+    };
+    let library = MusicLibrary::new(directory);
+    let temp_cache = std::env::var_os("FFE_TEST_AUDIO_CACHE_DIR")
+        .is_none()
+        .then(|| tempfile::tempdir().expect("temporary audio cache"));
+    let cache_path = std::env::var_os("FFE_TEST_AUDIO_CACHE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| temp_cache.as_ref().map(|cache| cache.path().to_path_buf()))
+        .expect("audio cache path");
+    let music_bin = cache_path.join("music.bin");
+    assert!(
+        ffe_audio::RenderedMusic::ensure_music_bin(&library, &music_bin)
+            .expect("render local HMP tracks into music.bin")
+    );
+    let rendered =
+        ffe_audio::RenderedMusic::load_music_bin(&music_bin).expect("load packed music.bin");
+    assert_eq!(rendered.len(), SONG_COUNT);
+    for index in 0..SONG_COUNT {
+        let pcm = rendered.song(index).expect("rendered track");
+        assert!(!pcm.is_empty(), "song {} is empty", SONG_NAMES[index]);
+        assert!(
+            pcm.iter().any(|sample| sample.unsigned_abs() > 32),
+            "song {} rendered only silence",
+            SONG_NAMES[index]
+        );
+    }
+    assert!(
+        !ffe_audio::RenderedMusic::ensure_music_bin(&library, &music_bin)
+            .expect("reuse existing music.bin")
+    );
+}
+
+#[test]
 fn the_shipped_directory_contains_the_table_names() {
     let Some(directory) = music_dir() else {
         eprintln!("skipping the directory-name test: set FFE_MUSIC_DIR");

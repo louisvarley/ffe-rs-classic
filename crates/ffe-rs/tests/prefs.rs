@@ -43,14 +43,40 @@ fn main_page_hot_areas_are_the_originals_icon_squares() {
     prefs.page = MAIN;
     assert_eq!(prefs.click(70, 30), Activate::None);
     assert_eq!(prefs.page, MAIN);
-    // Return to Game closes; Quit reports the port's exit; the rows the port
-    // does not implement (Load/Save/Delete/New Game) do nothing.
+    // Return to Game closes and Quit reports the port's exit. The other main
+    // menu rows route into the native commander workflows.
     assert_eq!(prefs.click(114, 60), Activate::Close);
     assert!(!prefs.open);
     prefs.open = true;
     assert_eq!(prefs.click(34, 80), Activate::Quit);
-    for (x, y) in [(114, 30), (114, 40), (114, 50), (114, 80)] {
-        assert_eq!(prefs.click(x, y), Activate::None);
+    for (x, y, action) in [
+        (114, 30, Activate::Load),
+        (114, 40, Activate::Save),
+        (114, 50, Activate::Delete),
+        (114, 80, Activate::NewGame),
+    ] {
+        assert_eq!(prefs.click(x, y), action);
+    }
+    assert!(prefs
+        .rows()
+        .iter()
+        .filter(|row| matches!(row.label, "Load" | "Save" | "Delete" | "New Game"))
+        .all(|row| row.applied));
+    for (index, action) in [
+        Activate::Load,
+        Activate::Save,
+        Activate::Delete,
+        Activate::Close,
+        Activate::NewGame,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut prefs = Prefs::default();
+        prefs.escape();
+        prefs.keyboard = true;
+        prefs.selected = 6 + index;
+        assert_eq!(prefs.key(prefs::Key::Enter), action);
     }
 }
 
@@ -180,15 +206,57 @@ fn display_page_sets_the_port_only_presentation_options() {
     assert_eq!(prefs.display, DisplaySettings::default());
     let labels: Vec<&str> = prefs.rows().iter().map(|row| row.label).collect();
     assert!(labels.contains(&"4x"));
+    assert!(labels.contains(&"5x"));
+    assert!(!labels.contains(&"6x"));
     assert!(labels.contains(&"Pixel-perfect"));
     assert!(labels.contains(&"Nearest"));
+    assert!(labels.contains(&"xBRZ 2x"));
+    assert!(!labels.contains(&"xBRZ 3x"));
     assert!(labels.contains(&"4:3 (DOS)"));
     assert!(labels.contains(&"Fullscreen"));
+    let rows = prefs.rows();
+    assert_eq!(
+        rows.iter().find(|row| row.label == "Fullscreen").unwrap().y,
+        86
+    );
+    assert_eq!(
+        rows.iter().find(|row| row.label == "Scale2x").unwrap().y,
+        96
+    );
+    assert_eq!(
+        rows.iter().find(|row| row.label == "Square").unwrap().y,
+        126
+    );
+    prefs.page = MAIN;
+    let main_rows = prefs.rows();
+    assert_eq!(
+        main_rows
+            .iter()
+            .find(|row| row.label == "Advanced Options")
+            .unwrap()
+            .colour,
+        15
+    );
+    assert!(!prefs
+        .texts()
+        .iter()
+        .any(|text| text.text.contains("Yellow:")));
+    prefs.page = PORT;
+    assert_eq!(
+        prefs
+            .texts()
+            .iter()
+            .find(|text| text.text == "Advanced options:")
+            .unwrap()
+            .colour,
+        16
+    );
+    prefs.page = DISPLAY;
     // 3x, fill window, linear, square pixels.
     prefs.click(34, 56);
     prefs.click(178, 46);
     prefs.click(178, 80);
-    prefs.click(178, 136);
+    prefs.click(178, 126);
     assert_eq!(
         prefs.display,
         DisplaySettings {
@@ -200,18 +268,16 @@ fn display_page_sets_the_port_only_presentation_options() {
             scanline_intensity: 0.3,
         }
     );
-    // Each upscaler is selectable from its radio row.
+    // The remaining upscalers are selectable from their radio rows.
     prefs.click(178, 86);
     assert_eq!(prefs.display.filter, ffe_rs::display::Filter::XbrzX2);
     prefs.click(178, 96);
-    assert_eq!(prefs.display.filter, ffe_rs::display::Filter::XbrzX3);
-    prefs.click(178, 106);
     assert_eq!(prefs.display.filter, ffe_rs::display::Filter::Scale2x);
     // The optional scanline row reveals its intensity control and cycles it.
-    prefs.click(34, 106);
+    prefs.click(34, 96);
     assert!(prefs.display.scanlines);
     assert!(prefs.rows().iter().any(|row| row.label == "Intensity"));
-    prefs.click(34, 116);
+    prefs.click(34, 106);
     assert_eq!(prefs.display.scanline_intensity, 0.5);
     // Out-of-range scale rows do nothing.
     assert_eq!(prefs.apply(prefs::Action::WindowScale(0)), Activate::None);
@@ -277,7 +343,37 @@ fn the_preference_frame_uses_the_originals_grey_and_keeps_the_console() {
     assert!(view.contains(&16), "the red title");
     assert!(view.contains(&15), "the white labels");
     assert!(view.contains(&17), "the green commander line");
-    assert!(view.contains(&18), "the port-added yellow rows");
+    assert!(!view.contains(&18), "the menu has no yellow port-only rows");
+}
+
+#[test]
+fn the_save_and_load_lists_match_the_preference_pages() {
+    let mut menu = screen();
+    menu.draw_prefs(&Prefs::default());
+    let menu_pixels = menu.logical_pixels().to_vec();
+
+    let mut list = screen();
+    let rows = vec![
+        ("quick.json".to_owned(), true),
+        ("save-0001.json".to_owned(), false),
+    ];
+    list.draw_pref_list(
+        "Load Commander",
+        "Saved commanders:",
+        &rows,
+        "Esc to go back",
+    );
+    let pixels = list.logical_pixels();
+    // The same palette-3 upper view and the same console below it.
+    assert_eq!(pixels[0], 3);
+    assert_eq!(pixels[100 * 320 + 300], 3);
+    assert_eq!(pixels[158 * 320], menu_pixels[158 * 320]);
+    // Not the navigation list's flat colour-1 panel.
+    let view = &pixels[..320 * 158];
+    assert!(!view.contains(&1), "no navigation-list background");
+    assert!(view.contains(&16), "the red sub-heading");
+    assert!(view.contains(&15), "the white labels");
+    assert!(view.contains(&17), "the green heading");
 }
 
 #[test]
@@ -314,10 +410,12 @@ fn the_flight_background_is_the_original_space_colour() {
     }
 }
 
-/// The Graphic Detail page's "Black" still leaves the original's stars drawn
-/// over the black sky (the "Background stars" option in Others stays on).
+/// The Graphic Detail page's "Black" fills the sky with true black. The stars drawn over it are
+/// F1775's model-0x13b background, which needs the content cache and a scene; the local
+/// `flight_background_model315_reaches_frame` test in `effects_view.rs` checks that they still
+/// show over black space.
 #[test]
-fn the_black_space_colour_still_draws_the_stars() {
+fn the_black_space_colour_fills_the_sky() {
     let mut screen = screen();
     let state = Flight::free_flight();
     let view = 320 * 158;
@@ -331,26 +429,11 @@ fn the_black_space_colour_still_draws_the_stars() {
         true,
         "test",
     );
-    let with_stars = screen.logical_pixels().to_vec();
-    let black = with_stars[..view]
+    let black = screen.logical_pixels()[..view]
         .iter()
         .filter(|pixel| **pixel == 0)
         .count();
     assert!(black > view / 2, "black sky: {black} of {view} pixels");
-    screen.stars_visible = false;
-    screen.draw(
-        &state,
-        ffe_rs::camera::ViewState::default(),
-        None,
-        true,
-        "test",
-    );
-    let stars = with_stars[..view]
-        .iter()
-        .zip(&screen.logical_pixels()[..view])
-        .filter(|(with, without)| with != without)
-        .count();
-    assert!(stars > 0, "the stars are still drawn over black space");
 }
 
 /// A selection made on the Graphic Detail page survives closing and
@@ -377,4 +460,47 @@ fn the_space_colour_persists_within_the_session() {
     let blue = rows.iter().find(|row| row.label == "Light Blue").unwrap();
     assert_eq!(black.mark, prefs::Mark::Radio(true));
     assert_eq!(blue.mark, prefs::Mark::Radio(false));
+}
+
+#[test]
+fn the_save_name_box_matches_the_lists_and_keeps_json_fixed() {
+    let mut list = screen();
+    list.draw_pref_list("Load Commander", "Saved commanders:", &[], "Esc to go back");
+    let list_pixels = list.logical_pixels().to_vec();
+
+    let mut boxed = screen();
+    boxed.draw_pref_textbox(
+        "Save Commander",
+        "Name for the new save:",
+        "commander-00000006",
+        ".json",
+        true,
+        "Type a name; Enter saves, Esc goes back",
+    );
+    let pixels = boxed.logical_pixels().to_vec();
+    // The same upper-view colour and console as the list pages.
+    assert_eq!(pixels[0], 3);
+    assert_eq!(pixels[158 * 320], list_pixels[158 * 320]);
+    // The box has a white border and a black inside.
+    assert_eq!(
+        pixels[30 * 320 + 32],
+        list_pixels[30 * 320 + 32].max(15).min(15)
+    );
+    assert_eq!(pixels[37 * 320 + 33], 0);
+    // The name is drawn white and the caret yellow, then the fixed ending.
+    let row = |y: usize| &pixels[y * 320 + 34..y * 320 + 286];
+    assert!((33..44).any(|y| row(y).contains(&15)), "name text");
+    assert!((33..44).any(|y| row(y).contains(&18)), "caret");
+
+    // A longer name pushes the ending along; the ending never moves into the name.
+    let mut longer = screen();
+    longer.draw_pref_textbox(
+        "Save Commander",
+        "Name for the new save:",
+        "commander-000000066",
+        ".json",
+        false,
+        "",
+    );
+    assert_ne!(longer.logical_pixels(), &pixels[..]);
 }

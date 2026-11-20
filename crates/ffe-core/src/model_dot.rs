@@ -172,6 +172,232 @@ impl DotTables {
     }
 }
 
+/// The first sprite record index: F1700 maps a sub-pixel object to a size from -7 to 0, and
+/// F1609 reads the record at `DATA_007784 + 18 * size` (so seven records lie before the label).
+pub const SPRITE_FIRST: i32 = -7;
+/// Records from [`SPRITE_FIRST`] to 13.
+pub const SPRITE_RECORDS: usize = 21;
+/// Bytes per record: the halo's nine (`DATA_007784` side), then the core's nine (`DATA_007785`).
+const SPRITE_RECORD: usize = 18;
+/// `DATA_007825`: F1700's map from a sub-pixel size (`size >> 3`) to a sprite record.
+pub const SIZE_MAP_BYTES: usize = 33;
+/// Bytes of the sprites and the size map, as the importer stores them in that order.
+pub const OBJECT_TABLE_BYTES: usize = SPRITE_RECORDS * SPRITE_RECORD + SIZE_MAP_BYTES;
+/// Bytes per model in the descriptor records that follow: far class, dot class, then the
+/// descriptor's three colour bytes (`+0x24`..`+0x26`), padded.
+pub const OBJECT_MODEL_BYTES: usize = 8;
+
+/// What F1680 reads from a model descriptor to draw an object as a dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectModel {
+    /// `+0x20`: the distance class at which the object is no longer drawn.
+    pub far: i32,
+    /// `+0x28`: the distance class from which it is drawn as a dot.
+    pub dot: i32,
+    /// `+0x24`..`+0x26` masked to nibbles: the dot's colour.
+    pub colour: [u8; 3],
+    /// Bit 7 of `+0x24`: the object is its own light (a star), so no shade is added.
+    pub unlit: bool,
+}
+
+/// The tables the dots of far objects use (F1700 with F1680's object flag): the sprite records
+/// F1609 draws, the size map, and every model's [`ObjectModel`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectDotTables {
+    sprites: [[i8; SPRITE_RECORD]; SPRITE_RECORDS],
+    size_map: [i8; SIZE_MAP_BYTES],
+    models: Vec<[u8; OBJECT_MODEL_BYTES]>,
+}
+
+impl ObjectDotTables {
+    pub fn new(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < OBJECT_TABLE_BYTES
+            || (bytes.len() - OBJECT_TABLE_BYTES) % OBJECT_MODEL_BYTES != 0
+        {
+            return Err(format!(
+                "The object dot tables are {} bytes, not {OBJECT_TABLE_BYTES} plus whole model records.",
+                bytes.len()
+            ));
+        }
+        let mut sprites = [[0i8; SPRITE_RECORD]; SPRITE_RECORDS];
+        for (record, chunk) in sprites.iter_mut().zip(bytes.chunks_exact(SPRITE_RECORD)) {
+            for (out, byte) in record.iter_mut().zip(chunk) {
+                *out = *byte as i8;
+            }
+            // Each half is a centre half-width and then half-widths until a negative byte.
+            for half in record.chunks_exact(SPRITE_RECORD / 2) {
+                if !half[1..].iter().any(|byte| *byte < 0) {
+                    return Err("A dot sprite has no end marker.".to_owned());
+                }
+            }
+        }
+        let mut size_map = [0i8; SIZE_MAP_BYTES];
+        let map = &bytes[SPRITE_RECORDS * SPRITE_RECORD..OBJECT_TABLE_BYTES];
+        for (out, byte) in size_map.iter_mut().zip(map) {
+            *out = *byte as i8;
+            if !(SPRITE_FIRST..=0).contains(&i32::from(*out)) {
+                return Err("A dot size map entry is out of range.".to_owned());
+            }
+        }
+        let models = bytes[OBJECT_TABLE_BYTES..]
+            .chunks_exact(OBJECT_MODEL_BYTES)
+            .map(|record| record.try_into().unwrap())
+            .collect();
+        Ok(Self {
+            sprites,
+            size_map,
+            models,
+        })
+    }
+
+    /// The model's descriptor fields; `None` when it has no descriptor (far class 0).
+    pub fn model(&self, index: u32) -> Option<ObjectModel> {
+        let record = self.models.get(index as usize)?;
+        (record[0] != 0).then(|| ObjectModel {
+            far: i32::from(record[0]),
+            dot: i32::from(record[1]),
+            colour: [record[2] & 0xf, record[3] & 0xf, record[4] & 0xf],
+            unlit: record[2] & 0x80 != 0,
+        })
+    }
+
+    /// One half of the sprite record `size`: the halo's (`core` false) or the core's.
+    fn sprite(&self, size: i32, core: bool) -> Option<&[i8]> {
+        let record = self
+            .sprites
+            .get(usize::try_from(size - SPRITE_FIRST).ok()?)?;
+        let half = SPRITE_RECORD / 2;
+        Some(if core {
+            &record[half..]
+        } else {
+            &record[..half]
+        })
+    }
+}
+
+/// F1700's dot for an object F1680 sends it (its object flag set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectDot {
+    /// One particle (F1701), for a dot under a pixel across or over nine.
+    Particle(Dot),
+    /// F1802: a halo sprite, then a core sprite over it, of record `size`.
+    Sprites {
+        x: i16,
+        y: i16,
+        size: i32,
+        halo: [u8; 3],
+        core: [u8; 3],
+    },
+}
+
+impl ObjectDot {
+    /// The runs it draws, in order, each with its colour.
+    pub fn spans(&self, tables: &ObjectDotTables) -> Vec<(Span, [u8; 3])> {
+        match *self {
+            ObjectDot::Particle(dot) => dot.spans(),
+            ObjectDot::Sprites {
+                x,
+                y,
+                size,
+                halo,
+                core,
+            } => [(false, halo), (true, core)]
+                .into_iter()
+                .flat_map(|(is_core, colour)| {
+                    tables
+                        .sprite(size, is_core)
+                        .map(|data| sprite(i32::from(x), i32::from(y), data))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(move |span| (span, colour))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// F1700 for an object F1680 draws as a dot. `screen` is its projected centre, `size` F1680's
+/// `SpecialDiv(radius, depth)` (the projected radius in pixels), `radius` and `depth` the
+/// operands of that division, `colour` the descriptor's nibbles and `shade` the instance's
+/// first shade (`+0x84`), which a lit object adds. `Ok(None)` when nothing reaches the view.
+/// A lit object nine pixels or more across is a shaded sphere in the original, which is not
+/// ported (`Err`).
+#[allow(clippy::too_many_arguments)]
+pub fn object_dot(
+    screen: [i16; 2],
+    size: i32,
+    radius: i32,
+    depth: i32,
+    colour: [u8; 3],
+    unlit: bool,
+    shade: [u8; 3],
+    tables: &ObjectDotTables,
+    sky: [u8; 3],
+) -> Result<Option<ObjectDot>, String> {
+    // F1700's clip: the dot must reach the view.
+    let half = size / 2;
+    let reaches = |value: i32, limit: i32| {
+        if (0..limit).contains(&value) {
+            true
+        } else if value < 0 {
+            (0..limit).contains(&(value + half))
+        } else {
+            (0..limit).contains(&(value - half))
+        }
+    };
+    let [x, y] = screen.map(i32::from);
+    if !reaches(x, WIDTH) || !reaches(y, HEIGHT) {
+        return Ok(None);
+    }
+    let mut colour = colour;
+    if !unlit {
+        if size >= 9 {
+            return Err(
+                "A lit object nine pixels across is a shaded sphere, which is not ported."
+                    .to_owned(),
+            );
+        }
+        colour = std::array::from_fn(|k| colour[k].wrapping_add(shade[k]));
+    }
+    let mut size = size;
+    if size == 0 {
+        // The object flag recomputes a finer size, in 1/256 of a pixel.
+        let fine = crate::model_thruster::special_divide(radius, depth >> 8)?;
+        if fine == 0 {
+            return Ok(Some(ObjectDot::Particle(Dot {
+                x: screen[0],
+                y: screen[1],
+                shape: DotShape::One { size: 0, colour },
+            })));
+        }
+        let index = usize::try_from(fine >> 3).map_err(|_| "A negative dot size.".to_owned())?;
+        size = tables
+            .size_map
+            .get(index)
+            .map(|entry| i32::from(*entry))
+            .ok_or_else(|| "A dot size is past the size map.".to_owned())?;
+    } else if size > 9 {
+        return Ok(Some(ObjectDot::Particle(Dot {
+            x: screen[0],
+            y: screen[1],
+            shape: DotShape::One { size, colour },
+        })));
+    }
+    if !(0..WIDTH).contains(&x) || !(0..HEIGHT).contains(&y) {
+        return Ok(None);
+    }
+    // F1802's halo is the colour mixed a third towards the sky.
+    let halo =
+        std::array::from_fn(|k| ((u32::from(colour[k]) * 2 + u32::from(sky[k]) + 1) / 3) as u8);
+    Ok(Some(ObjectDot::Sprites {
+        x: screen[0] - 1,
+        y: screen[1] - 1,
+        size,
+        halo,
+        core: colour,
+    }))
+}
+
 /// One dot as F1700 queues it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dot {

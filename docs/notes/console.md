@@ -80,8 +80,12 @@ hyperspace) and 0x74 (`t` target). F1 and F2 overlap at x 74-79, where F2 wins.
   navigation computer (lit while its list is open) and hyperspace. The
   navigation list, the labels toggle, hyperspace and target are ported; see
   `labels.md`.
-- F2 opens the status page, F3 the map and F4 the services board from a docked
-  or pad state (`F343`); F5, the missile and combat views and the escape capsule
+- F2 opens the status page in flight, on a pad **and docked in a station** (the
+  executed original does: start key `0x04`, Lave, F2 = scancode `0x3c` shows the
+  Ship Equipment Status page over the cabin backdrop with the flight console; F1
+  leaves it, F4 returns to the services board, and the port ignores F2 while a
+  docking or launch sequence runs). F3 the map and F4 the services board from a
+  docked or pad state (`F343`); the map is still flight-only in the port; F5, the missile and combat views and the escape capsule
   answer with "not ported yet".
 - A readout under the title shows speed, the set speed (original model) and the
   time scale; it is ffe-rs's, not the original's.

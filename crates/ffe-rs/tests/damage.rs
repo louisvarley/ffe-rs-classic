@@ -299,16 +299,18 @@ fn the_daily_servicing_roll_can_break_equipment_or_the_drive() {
     let mut flight = self::flight();
     flight.loadout = Loadout::default();
     flight.loadout.general = 1 << 20;
+    flight.loadout.drive = 2;
     flight.last_service_day = Some(0);
-    flight.damage.service_counters = [0, 0];
+    // F934 decrements before rolling; one remaining day reaches counter 0,
+    // while starting at zero wraps to u32::MAX and suppresses the roll.
+    flight.damage.service_counters = [1, 1];
     let events = flight.service_day(100);
-    assert!(!events.is_empty());
-    assert_eq!(flight.combat.drive, 0);
-    assert_eq!(flight.loadout.drive, 0);
-    assert!(events
-        .iter()
-        .any(|event| *event == SystemEvent::DriveFailure
-            || *event == SystemEvent::EquipmentFailure(20)));
+    let equipment_failed = events.contains(&SystemEvent::EquipmentFailure(20));
+    let drive_failed = events.contains(&SystemEvent::DriveFailure);
+    assert!(equipment_failed || drive_failed);
+    assert_eq!(flight.combat.drive == 0, drive_failed);
+    assert_eq!(flight.loadout.drive == 0, drive_failed);
+    assert_eq!(flight.loadout.general & (1 << 20) == 0, equipment_failed);
 }
 
 /// The gameplay slice's scripted sequence: a hit destroys the Main thruster,

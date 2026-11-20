@@ -525,7 +525,7 @@ fn ship_pick(mode: usize, ctx: &Context<'_>, rng: &mut Random) -> (u16, u32) {
 }
 
 /// F634: queue one ship for the starport, three times in eight.
-fn queue_ship(board: &mut Board, mode: usize, ctx: &Context<'_>, rng: &mut Random) {
+pub fn queue_ship(board: &mut Board, mode: usize, ctx: &Context<'_>, rng: &mut Random) {
     rng.advance();
     if rng.b & 8 == 0 && board.ships.len() < MAX_SHIPS {
         let picked = ship_pick(mode, ctx, rng);
@@ -689,6 +689,75 @@ pub fn news_round(jobs: &mut Vec<Job>, ctx: &Context<'_>, rng: &mut Random, rank
         14 => rank_job(jobs, ctx, rng, rank_difference, 1),
         15 => rank_job(jobs, ctx, rng, rank_difference, 2),
         _ => {}
+    }
+}
+
+/// F633's board half for one place, after that place's 99 market steps: with
+/// chance `population / 7` one advertisement is replaced in place (F922(7), the
+/// victim by F922(count), its flag cleared, then F621 into the same slot), then
+/// one queued ship leaves (F922(14)) and F634 may queue one each for the patrol
+/// and trade rows and the starport row (F922(9), F922(9), F922(27)).
+pub fn daily_place(
+    board: &mut Board,
+    ctx: &Context<'_>,
+    remembered: &mut Remembered,
+    rng: &mut Random,
+) {
+    if rng.bounded(7) < ctx.population {
+        let at = rng.bounded(board.entries.len() as u32) as usize;
+        if let Some(entry) = board.entries.get(at).copied() {
+            // The old advertisement's mark on the place's flag byte (`+0x131`).
+            match entry.code {
+                0x9827 => board.flags &= 0xfb,
+                0x9828 => board.flags &= 0xf7,
+                0x9829 => board.flags &= if (entry.args[0] as i32) < 0 { 0xfd } else { 0xfe },
+                _ => {}
+            }
+            board.entries[at].code = 0;
+        }
+        // F621 with the count one lower, so F646 writes the slot just cleared
+        // (and the count is put back whether or not a handler stored anything).
+        let mut scratch = Board {
+            flags: board.flags,
+            ..Board::default()
+        };
+        attempt(&mut scratch, ctx, remembered, rng);
+        board.flags = scratch.flags;
+        if let (Some(slot), Some(new)) = (board.entries.get_mut(at), scratch.entries.first()) {
+            *slot = *new;
+        }
+    }
+    let leaving = rng.bounded(14) as usize;
+    if leaving < board.ships.len() {
+        board.ships.remove(leaving);
+    }
+    if rng.bounded(9) < ctx.patrol {
+        queue_ship(board, 0, ctx, rng);
+    }
+    if rng.bounded(9) < ctx.trade {
+        queue_ship(board, 1, ctx, rng);
+    }
+    if rng.bounded(27) < ctx.places {
+        queue_ship(board, 13, ctx, rng);
+    }
+}
+
+/// F633's job half, before the places: the entries dated before `day + 4` are
+/// dropped (a signed compare), then three chances, each F922(25) at or below
+/// `DATA_009001` (the news round count, `maximum control * 8 + 8`), at a news round.
+pub fn daily_jobs(
+    jobs: &mut Vec<Job>,
+    ctx: &Context<'_>,
+    rng: &mut Random,
+    maximum_control: u32,
+    rank_difference: u32,
+) {
+    let keep_from = ctx.day.wrapping_add(4) as i32;
+    jobs.retain(|job| keep_from <= job.date as i32);
+    for _ in 0..3 {
+        if rng.bounded(25) <= maximum_control * 8 + 8 {
+            news_round(jobs, ctx, rng, rank_difference);
+        }
     }
 }
 

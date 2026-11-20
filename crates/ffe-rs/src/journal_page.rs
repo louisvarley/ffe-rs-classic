@@ -32,6 +32,25 @@ pub const MORE: (u16, i32, i32) = (0xa601, 0x9a, 0x92);
 /// F78's byline message, `0xa602` ("By:  ").
 pub const BYLINE: u16 = 0xa602;
 
+/// F76's subscription column in the ship-library archive (F79): `0xa605`
+/// expands the remaining-issue count and `0xa606` is shown otherwise.
+pub fn subscription_status(
+    journal: &ffe_core::journal_library::Journal,
+    today: u32,
+    messages: &ffe_core::message_strings::Messages<'_>,
+) -> Option<String> {
+    let remaining = journal.expiry.saturating_sub(today);
+    if journal.flags & ffe_core::journal_library::SUBSCRIBED != 0
+        && journal.period != 0
+        && remaining / journal.period > 0
+    {
+        let issues = remaining.saturating_sub(1) / journal.period;
+        Some(messages.text(0xa605)?.replacen('…', &issues.to_string(), 1))
+    } else {
+        messages.text(0xa606)
+    }
+}
+
 /// F1587 stops drawing glyphs once the pen reaches this x.
 const PEN_LIMIT: i32 = 0x13c;
 /// F1587 returns at a newline below this y.
@@ -421,6 +440,36 @@ pub fn arrow_action(x: i32, y: i32, size: (i32, i32)) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_subscription_text_uses_the_source_period_count_and_strings() {
+        let mut strings = vec![Vec::new(); 7];
+        strings[5] = b"\xff0\x01 issues remaining".to_vec();
+        strings[6] = b"No subscription".to_vec();
+        let bytes = ffe_core::message_strings::encode(&[(19, strings)]).unwrap();
+        let messages = ffe_core::message_strings::Messages::new(&bytes).unwrap();
+        let mut journal = ffe_core::journal_library::Journal {
+            period: 30,
+            flags: ffe_core::journal_library::SUBSCRIBED,
+            expiry: 61,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            subscription_status(&journal, 0, &messages).as_deref(),
+            Some("2 issues remaining")
+        );
+        journal.expiry = 30;
+        assert_eq!(
+            subscription_status(&journal, 0, &messages).as_deref(),
+            Some("0 issues remaining")
+        );
+        journal.flags = 0;
+        assert_eq!(
+            subscription_status(&journal, 0, &messages).as_deref(),
+            Some("No subscription")
+        );
+    }
 
     fn widths() -> [i8; 256] {
         let mut table = [0i8; 256];

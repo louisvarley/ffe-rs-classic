@@ -17,6 +17,10 @@ fn font_model() -> ViewerModel {
 /// One glyph program: a point on vertex 0, then a return whose bits 6.. name the
 /// next pen vertex (0, so the pen does not move).
 fn glyph_set() -> GlyphSet {
+    glyph_set_with_newline(None)
+}
+
+fn glyph_set_with_newline(newline_vertex: Option<u32>) -> GlyphSet {
     // Every character in the set aliases the one program (as lowercase aliases
     // uppercase in the original fonts).
     let count = ffe_core::model_commands::GLYPH_CHAR_LIMIT;
@@ -27,7 +31,7 @@ fn glyph_set() -> GlyphSet {
         .flat_map(u32::to_le_bytes)
         .collect();
     payload.extend_from_slice(&program);
-    GlyphSet::from_payload(&payload, count as u32, 4, 0, None).unwrap()
+    GlyphSet::from_payload(&payload, count as u32, 4, 0, newline_vertex).unwrap()
 }
 
 /// Parent model (slot 9): vertex 0 at (0, 0, 40) and one text command.
@@ -94,4 +98,69 @@ fn text_records_run_their_glyph_programs_and_move_the_pen() {
     missing.set_glyph_sets(vec![Some(glyph_set())]);
     missing.step(1);
     assert_eq!(missing.render().unwrap().skipped, 1);
+}
+
+#[test]
+fn text_control_codes_move_to_the_font_newline_anchor() {
+    let mut viewer =
+        ModelViewer::from_models(vec![font_model(), text_model(0x4000, 0)], table()).unwrap();
+    viewer.set_model_strings(vec![b"A\nA".to_vec()]);
+    viewer.set_glyph_sets(vec![Some(glyph_set_with_newline(Some(2)))]);
+    viewer.step(1);
+    let frame = viewer.render().unwrap();
+    assert_eq!(frame.skipped, 0);
+    assert_eq!(frame.texts, 1);
+    assert_eq!(
+        frame
+            .shapes
+            .iter()
+            .filter(|shape| matches!(shape, Shape::Point(_, _)))
+            .count(),
+        2
+    );
+
+    // Without the cache's anchor, F1747 cannot place the next line and stops.
+    let mut missing =
+        ModelViewer::from_models(vec![font_model(), text_model(0x4000, 0)], table()).unwrap();
+    missing.set_model_strings(vec![b"A\nA".to_vec()]);
+    missing.set_glyph_sets(vec![Some(glyph_set())]);
+    missing.step(1);
+    let frame = missing.render().unwrap();
+    assert_eq!(frame.skipped, 1);
+    assert_eq!(
+        frame
+            .shapes
+            .iter()
+            .filter(|shape| matches!(shape, Shape::Point(_, _)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+#[ignore = "Local-only: checks source font descriptors in the content cache"]
+fn imported_font_newline_anchors_match_the_source_descriptors() {
+    let cache_path = std::env::var_os("FFE_TEXT_CACHE").expect("FFE_TEXT_CACHE");
+    let cache = ffe_content::read(&std::fs::read(cache_path).unwrap()).unwrap();
+    for (index, expected) in [(0, 58), (1, 38), (2, 20)] {
+        let id = format!("base:model-glyphs/{index:03}");
+        let record = cache
+            .manifest()
+            .files
+            .iter()
+            .find(|record| record.id == id)
+            .unwrap();
+        let ffe_content::AssetKind::GlyphPrograms {
+            index: actual_index,
+            newline_vertex: Some(actual),
+            vertex_count,
+            ..
+        } = record.asset
+        else {
+            panic!("font {index} has no imported newline anchor");
+        };
+        assert_eq!(actual_index, index);
+        assert_eq!(actual, expected);
+        assert!(actual < vertex_count);
+    }
 }

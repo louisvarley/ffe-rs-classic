@@ -1531,10 +1531,85 @@ fn the_ship_library_shows_each_journals_first_issue() {
             &mut state, &mut nav, &cache, station, &assets, &messages, "Jameson", *slot,
         );
         assert!(!articles.is_empty(), "{name} has no first issue");
+        for article in &articles {
+            assert!(
+                !article.headline.contains('[') && !article.body.contains('['),
+                "{name} has an unexpanded F76 macro in {:?} / {:?}",
+                article.headline,
+                article.body
+            );
+        }
         let first = &articles[0];
         println!("{name}: {} / {}", first.publication, first.headline);
         assert!(!first.headline.trim().is_empty());
     }
+
+    let archive = ffe_core::journal::Journal::new(&assets.archive).expect("journal archive");
+    let cs_article = (0..archive.len())
+        .find(|index| {
+            archive
+                .raw(*index)
+                .is_some_and(|raw| raw.windows(3).any(|window| window == b"[Cs"))
+        })
+        .expect("an archive article using Cs");
+    let current_system = nav.system_name().to_owned();
+    ffe_rs::scripts::with_all(&mut state, &mut nav, &cache, |scripts, _, _| {
+        let scripts = scripts.as_mut().expect("new game scripts");
+        scripts.library.journals[0].issue = Some(0);
+        scripts.library.records[0] = ffe_core::journal_library::Record {
+            article: cs_article as i32,
+            flags: ffe_core::journal_library::SHOWN,
+            ..Default::default()
+        };
+    });
+    let articles = ffe_rs::scripts::issue(
+        &mut state, &mut nav, &cache, station, &assets, &messages, "Jameson", 0,
+    );
+    let expanded = articles.first().expect("Cs article displayed");
+    assert!(
+        !expanded.headline.contains("[Cs") && !expanded.body.contains("[Cs"),
+        "current-system macro was not expanded: {:?} / {:?}",
+        expanded.headline,
+        expanded.body
+    );
+    assert!(
+        expanded.body.contains(&format!("{current_system}and")),
+        "Cs must use the current-system F860 name and consume its following source byte: {:?}",
+        expanded.body
+    );
+}
+
+/// Inventory F76 prefixes across the full imported journal archive before
+/// choosing the next source-backed macro implementation.
+#[test]
+#[ignore = "Local-only: needs the content cache (FFE_WORLD_CACHE)"]
+fn journal_archive_macro_prefix_census() {
+    use std::collections::BTreeMap;
+
+    let cache = cache();
+    let assets = ffe_rs::scripts::Assets::load(&cache).expect("cache v33");
+    let archive = ffe_core::journal::Journal::new(&assets.archive).expect("journal archive");
+    let mut counts = BTreeMap::<[u8; 2], usize>::new();
+    let mut samples = BTreeMap::<[u8; 2], String>::new();
+    let mut total = 0usize;
+    for article in 0..archive.len() {
+        let text = archive.raw(article).expect("article");
+        for index in 0..text.len().saturating_sub(2) {
+            if text[index] == b'[' {
+                let prefix = [text[index + 1], text[index + 2]];
+                *counts.entry(prefix).or_default() += 1;
+                samples.entry(prefix).or_insert_with(|| {
+                    String::from_utf8_lossy(&text[index..text.len().min(index + 90)]).into_owned()
+                });
+                total += 1;
+            }
+        }
+    }
+    println!(
+        "{} articles; {total} bracket prefixes: {counts:?}; samples: {samples:?}",
+        archive.len()
+    );
+    assert_eq!(archive.len(), ffe_core::journal::ARTICLES);
 }
 
 /// F80/F79's issue page for each journal of a new game: F78's text with its

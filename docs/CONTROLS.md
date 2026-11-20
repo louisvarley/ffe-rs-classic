@@ -64,8 +64,9 @@ right button is the steering hold. The left button remains the console pointer
 | Hyperspace to the chosen destination (also after the map closes) | **H**, or the jump icon on the ship diagram (F1116's record 0x45, shown when the destination is in range with the fuel and the ship is at least 12,000 km out) |
 | Engines on/off in flight (F1056's action 9; cancels the autopilot when it is flying; switching on engages it on a locked target) | Click either engine nozzle on the ship diagram |
 | Re-centre the galaxy map | **C** |
-| Map page (while the map is open): controls / select / details / picture | **F5 / F6 / F7 / F8** |
-| Map page: details with next / previous; zoom in / out | **F9 / F10; F11 / F12** |
+| Map page (while the map is open): controls / system map / system description / star sky | **F5 / F6 / F7 / F8** (the icons on the console row do the same; F7 needs a selected star, and a click on a body of its diagram shows that body's facts) |
+| System map (F6 on the map: this system; **N** or **R** with a star selected: that star's system) | Click a body to target it, **T** then click to autopilot to it, click the arrows at the lower right or hold **Left/Right** to move the time point, right-drag to turn, **F11/F12** or Page Up/Down to zoom, **C** centres on the picked body, **Home** the star, **F6**/**Delete** back to now; **F5**, **F7-F10** return to the map's own pages |
+| Map page: economy / people; zoom in / out (the sky's zoom in picture mode) | **F9 / F10; F11 / F12** |
 | Time acceleration 1x/10x/100x/1000x/10000x | **6 7 8 9 0** (or the meter) |
 | Pause | **P** (or the meter) |
 | Views: cycle / front / rear / turret / external | **F1 / F6 / F7 / F8 / F9** |

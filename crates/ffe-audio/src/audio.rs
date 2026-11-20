@@ -1,6 +1,7 @@
 use crate::library::MusicLibrary;
 use crate::mixer::EffectLibrary;
 use crate::player::MusicPlayer;
+use crate::render::{default_cache_dir, RenderedMusic};
 use crate::settings::{AudioSettings, SoundFlags, SONG_COUNT};
 use crate::sink::{MidiSink, MixerSampleSink, NullMidiSink, NullSampleSink, SampleSink};
 use ffe_core::hmp::HmpError;
@@ -113,6 +114,7 @@ pub struct AudioEngine {
     settings: AudioSettings,
     flags: SoundFlags,
     rng: u32,
+    rendered_music: Option<RenderedMusic>,
 }
 
 impl AudioEngine {
@@ -140,6 +142,7 @@ impl AudioEngine {
             settings: AudioSettings::default(),
             flags: SoundFlags::default(),
             rng: seed,
+            rendered_music: None,
         }
     }
 
@@ -166,28 +169,98 @@ impl AudioEngine {
         Ok(Self::new(library, sink, samples))
     }
 
-    /// Prefer the system MIDI device and the default wave output, falling back
-    /// to silence/headless independently. This is the helper a game loop should
-    /// normally use.
+    /// Prepare the local rendered music cache, then open the platform PCM
+    /// output. Windows retains system MIDI as its fallback when wave output or
+    /// cache generation is unavailable.
     pub fn system(library: MusicLibrary) -> Self {
         Self::system_with_effects(library, EffectLibrary::new())
     }
 
     /// [`Self::system`] with the cache's decoded effects installed.
     pub fn system_with_effects(library: MusicLibrary, effects: EffectLibrary) -> Self {
+        let rendered = match RenderedMusic::prepare(&library, &default_cache_dir()) {
+            Ok(rendered) if rendered.len() == SONG_COUNT => Some(rendered),
+            Ok(rendered) => {
+                eprintln!(
+                    "generated music cache has {} of {SONG_COUNT} songs; using platform MIDI fallback",
+                    rendered.len()
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!("generated music is unavailable: {error}");
+                None
+            }
+        };
+        Self::system_with_rendered_music(library, effects, rendered)
+    }
+
+    /// Open the normal audio device and load pre-rendered songs from the
+    /// launcher's `music.bin`. This game path never regenerates a missing bundle.
+    pub fn system_with_effects_from_music_bin(
+        library: MusicLibrary,
+        effects: EffectLibrary,
+        music_bin: &std::path::Path,
+    ) -> Self {
+        let rendered = match RenderedMusic::load_music_bin(music_bin) {
+            Ok(rendered) if rendered.len() == SONG_COUNT => Some(rendered),
+            Ok(rendered) => {
+                eprintln!(
+                    "{} contains {} of {SONG_COUNT} songs; music is unavailable",
+                    music_bin.display(),
+                    rendered.len()
+                );
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "could not load music bundle {}: {error}",
+                    music_bin.display()
+                );
+                None
+            }
+        };
+        Self::system_with_rendered_music(library, effects, rendered)
+    }
+
+    fn system_with_rendered_music(
+        library: MusicLibrary,
+        effects: EffectLibrary,
+        rendered: Option<RenderedMusic>,
+    ) -> Self {
         #[cfg(target_os = "windows")]
         {
-            let samples = MixerSampleSink::open(effects.clone())
-                .unwrap_or_else(|_| MixerSampleSink::new(effects));
-            match crate::sink::WindowsMidiSink::open(None) {
-                Ok(midi) => Self::new(library, midi, samples),
-                Err(_) => Self::new(library, NullMidiSink, samples),
+            let (samples, pcm_device) = match MixerSampleSink::open(effects.clone()) {
+                Ok(samples) => (samples, true),
+                Err(_) => (MixerSampleSink::new(effects), false),
+            };
+            if let Some(rendered) = rendered.filter(|_| pcm_device) {
+                Self::new(library, NullMidiSink, samples).with_rendered_music(Some(rendered))
+            } else {
+                match crate::sink::WindowsMidiSink::open(None) {
+                    Ok(midi) => Self::new(library, midi, samples),
+                    Err(_) => Self::new(library, NullMidiSink, samples),
+                }
             }
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            let samples = MixerSampleSink::open(effects.clone()).unwrap_or_else(|error| {
+                eprintln!("Linux audio output is unavailable: {error}");
+                MixerSampleSink::new(effects)
+            });
+            Self::new(library, NullMidiSink, samples).with_rendered_music(rendered)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             Self::new(library, NullMidiSink, MixerSampleSink::new(effects))
+                .with_rendered_music(rendered)
         }
+    }
+
+    fn with_rendered_music(mut self, rendered: Option<RenderedMusic>) -> Self {
+        self.rendered_music = rendered;
+        self
     }
 
     /// Install decoded effect WAVs after construction. The game uses this when
@@ -247,8 +320,17 @@ impl AudioEngine {
 
     fn play_selected(&mut self, index: usize) -> Result<(), AudioError> {
         let song = self.library.load(index)?;
+        self.samples.stop_music_stream();
         self.player
             .play(song, index, &mut *self.midi, self.settings);
+        if let Some(pcm) = self
+            .rendered_music
+            .as_ref()
+            .and_then(|rendered| rendered.song(index))
+        {
+            self.samples
+                .play_music_stream(pcm, music_stream_level(self.settings.music_volume));
+        }
         Ok(())
     }
 }
@@ -281,6 +363,7 @@ impl Audio for AudioEngine {
 
     fn stop_song(&mut self) {
         self.player.stop(&mut *self.midi);
+        self.samples.stop_music_stream();
     }
 
     fn song_done(&self) -> bool {
@@ -313,6 +396,9 @@ impl Audio for AudioEngine {
 
     fn tick(&mut self, elapsed: Duration) {
         self.player.tick(elapsed, &mut *self.midi, self.settings);
+        if self.player.song_done() {
+            self.samples.stop_music_stream();
+        }
     }
 
     fn settings(&self) -> AudioSettings {
@@ -325,8 +411,11 @@ impl Audio for AudioEngine {
         self.settings = settings;
         if !settings.music_on {
             self.player.stop(&mut *self.midi);
+            self.samples.stop_music_stream();
         } else {
             self.player.set_settings(settings, &mut *self.midi);
+            self.samples
+                .set_music_stream_volume(music_stream_level(settings.music_volume));
         }
         if effects_were_on && !settings.effects_on {
             self.samples.stop_all();
@@ -340,6 +429,10 @@ impl Audio for AudioEngine {
     fn set_sound_flags(&mut self, flags: SoundFlags) {
         self.flags = flags;
     }
+}
+
+fn music_stream_level(volume: u8) -> u8 {
+    ((u16::from(volume.min(100)) * 63 + 50) / 100) as u8
 }
 
 fn time_seed() -> u32 {

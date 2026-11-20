@@ -1955,7 +1955,10 @@ fn ross_154_giant_draws_its_rings_from_merlin() {
     let nav = Navigator::new_game(&cache, 1).unwrap();
     let merlin = nav.bodies.iter().find(|b| b.name == "Merlin").unwrap();
     let giant = &nav.bodies[merlin.parent.expect("Merlin's planet")];
-    eprintln!("giant {} model {} seed {:#x}", giant.name, giant.model, giant.seed);
+    eprintln!(
+        "giant {} model {} seed {:#x}",
+        giant.name, giant.model, giant.seed
+    );
     let to: [f64; 3] = std::array::from_fn(|k| (giant.position[k] - merlin.position[k]) as f64);
     let dist = to.iter().map(|v| v * v).sum::<f64>().sqrt();
     let forward = to.map(|v| v / dist);
@@ -1994,7 +1997,11 @@ fn ross_154_giant_draws_its_rings_from_merlin() {
             for p in screen.logical_pixels() {
                 ppm.extend([(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
             }
-            std::fs::write(std::path::Path::new(&dir).join(format!("ross-{tag}.ppm")), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("ross-{tag}.ppm")),
+                ppm,
+            )
+            .unwrap();
         }
         screen.logical_pixels()[..320 * 158].to_vec()
     };

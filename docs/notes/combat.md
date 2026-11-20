@@ -91,16 +91,19 @@ The fire routine:
 
 **Lasers are hitscan.** There is no laser projectile object, speed or lifetime.
 The visible object is model `0x9c` (156), set on a duplicate of the player
-object and drawn at the gun by `F1776`; it is a small (about 64 mm after its
-`scale` 17) muzzle cone, not a line to the target. The cockpit eye of the Eagle
-is 1500/8 units ahead and the gun 1300/8, so the cone is 200/8 = 25 units
-**behind the front eye**; `F1776` hands it to `F1680`, whose F1479 projection
-has a near clip, so the original draws no front-view muzzle at all. The port
-must not clamp it onto the near plane: doing so invented a flash 62 px below
-the crosshair (2026-10-25, see §6.1). The cone is in front of the **external**
-camera (whose default is 49 m behind the ship) and shows as a pixel there; the
-rear and turret duplicates sit at or behind their cameras too. A long beam
-line is **not** in the original; do not add one. The hit flash is model `0x9d`
+object and drawn at the gun by `F1776` for the one frame `F1536` finds
+`+0x151 & 2` set. It is drawn at its **own scale 17** (the copy's `+0x7e`, the
+extra render shift, is 0 for the player), where its vertices are position units:
+the ray ends at the hit point (`+0xe6 = distance >> 7`, `0xffff` for a miss). In
+the Eagle's front view that is a solid wedge from the crosshair to both lower
+corners (13,206 pixels, red for the pulse and 1MW beam, yellow for the 20MW beam,
+cyan and about three times larger for the mining and Thargoid lasers); in the
+Saker's a one-pixel ray (286 pixels), because the Eagle's gun is behind its eye
+and the Saker's is ahead. The external view shows a short tick at the nose. All
+of this is measured from the executed original (`docs/KNOWN_ISSUES.md`, "Laser
+beams"); the port's `Screen::draw_beam` matches it. Use the model's laser code and
+length; never replace it with fixed screen-space rays.
+The hit flash is model `0x9d`
 (157), drawn at a ship whose shields absorbed a hit (`ship+0x151 & 1`, `F1536`
 at `ffe.asm:91274-91320`). Stations and planets take neither shields nor hull
 in `F953`, so they do not get that flash.
@@ -397,11 +400,13 @@ Owner report: "lasers do not seem to fire quite right." Reproduced and fixed:
   `tics` 1043) and the port fires at 0/38/76 in the new `laser_view` test. The
   conversion is now `combat::frame_tics` with a unit test, so a future change
   to a 50 Hz frame count is caught (§2.3.1).
-- **Invented muzzle.** The port clamped the model-156 origin's z to 1000, which
-  drew the cone at (160,140), 62 px below the gunsight, in the front view. F1776
-  draws it at the gun (1600 units behind the front eye) and F1680's near clip
-  drops it. `combat-beam-front.ppm` is now pixel-identical with and without the
-  beam; `combat-beam-external.ppm` shows the original external-view pixel.
+- **Beam scale corrected (2026-11-19).** Two earlier conclusions were wrong. The
+  claim that the original draws no beam pixel in the Eagle's or Saker's front view
+  came from a probe that fired at the end of a frame, where JJFFE's F149 loop
+  clears the draw flag before F1536 sees it. A shot taken through the key handler
+  is drawn (KNOWN_ISSUES.md), and the beam is model 156 at its own scale 17, not
+  the ship's scale 8 that hid it. The Eagle's muzzle origin is behind the eye and
+  the whole model is still submitted; the wedge is the original's picture.
 - **Gun-containing boxes.** `laser::hit` clamped the entry distance to 0, so a
   planet/station box around the gun was hit at distance 0 and swallowed the
   shot (reproduced by the new `laser_view` setup 200 m from a pirate in a
@@ -418,8 +423,8 @@ Owner report: "lasers do not seem to fire quite right." Reproduced and fixed:
   turret mount mapping and `ship[0xd2+view]` are unchanged and tested.
 - **Tests/frames.** `cargo test -p ffe-rs --test combat` (run geometry, mount
   axes, 60 Hz refire); `cargo test -p ffe-core --lib laser` (inside-box hit);
-  `cargo test -p ffe-rs --test combat_view -- --ignored` (front cull, external
-  muzzle); new `cargo test -p ffe-rs --test laser_view -- --ignored` fires at
+  `cargo test -p ffe-rs --test combat_view -- --ignored` (Eagle/Saker cockpit
+  beam, external muzzle); new `cargo test -p ffe-rs --test laser_view -- --ignored` fires at
   60 Hz at a pirate and keeps `laser-aim-before.ppm`, `laser-shot-1..3.ppm`,
   `laser-hit-1..3.ppm` (shields 100 -> 50 -> 0, hull 100 -> 50, model-157 flash
   and F1099's readout). `verify-combat.py` now runs `--laser-probe` and the new
@@ -433,22 +438,36 @@ Report: at the Ross 154 start the laser beam is much wider than at Hope.
   hulls differ: the Eagle (model 23, `--start 1`, Merlin) has eye `1500/30` and
   front gun `1300/0`, so the gun is 25 units **behind** the eye; the Saker
   (model 31, Hope) has eye `1800/400` and gun `2200/0`, 50 units ahead of it.
-- **Cause in the port.** `Screen::draw_beam` drew model 156's ray from the gun.
-  With the gun behind the eye the ray's polygon is near-clipped and fans out
-  into a red wedge over the whole front view (about 500 px wide at the bottom);
-  the Saker's gun in front of the eye gives a thin line.
-- **Original.** `jjffe-smoke --game-frame 902 0xff` with `FFE_TAKEOFF=1`
-  (Tab launch, Return/keypad 8 thrust) and `FFE_FIRE_AT=900` (real F931 on the
-  player's front mount at the end of frame 900) was run for `--start-key=0x02`
-  (Merlin/Eagle) and `0x39` (Hope/Saker), against the same run without the
-  shot. In both, **no pixel of the 320x158 view differs**; only the message log
-  and heat bar change. F1536 does clear `+0x151` bit 1 (fired) on the next
-  frame, but bit 4 (front mount, cleared by F1776) stays set; why F1776 leaves
-  it is not explained, so this is evidence from the probe, not a reading of the
-  model program.
-- **Fix.** The beam model is drawn only from the external camera
-  (`screen::beam_visible`). The earlier "ray from the gun" in cockpit views was
-  not in the original (it agrees with §2.2). The external view is unprobed.
+- **Camera rule.** The Eagle's gun is behind its eye, but `F1776` still submits
+  model 156 through `F1680`; the front camera must retain the ray beyond its
+  near plane. Hope's Saker starts with the gun ahead of its eye. Render the same
+  model at the firing mount in both cases.
+- **Earlier probe interpretation withdrawn (2026-11-16).** A prior pixel
+  comparison was used to hide all cockpit beams. The source call at
+  `ffe.asm:110913-111046` submits model 156 to F1680 without an eye-depth guard;
+  the whole beam must not be suppressed for Eagle.
+- **Fix and regression.** Removed the two hand-drawn orange screen-space rays
+  and the behind-eye suppression; the beam is model 156 at its own scale
+  (see 6.1 above). `tests/eagle_beam.rs` pins the original's wedge for the Eagle,
+  `combat_view` pins the Saker's 286-pixel ray and the colours of the pulse, 100MW
+  and mining codes.
+
+### 6.3 The 2026-11-19 beam audit
+
+Owner report: lasers fire "in all directions" at every start, laser type and view.
+
+- The beam was drawn at the ship's scale 8 (512x too small); see 6.1 and
+  `docs/KNOWN_ISSUES.md`.
+- **Gun position** is `forward * word + up * word` from the ship's *own* rows for
+  every mount; only the turret's *aim* is turned (F931 `ffe.asm:69702-69727`, F1776
+  `:111397-111441`). The port had turned the rows first.
+- **Rear mount:** F931 aims along `-forward` but places the gun at `+forward *
+  (stats+0x24)`; F1776 negates both the forward row and the word, which comes to the
+  same. The data word is positive (Eagle 800), so the original's rear gun is
+  *ahead* of the centre with the ray going backwards. The port put it behind. The
+  drawn basis negates only the forward row (not the right row).
+- Not drawn: NPC shots (JJFFE's F149 loop clears the flag after an NPC's F931, so
+  only NPC beam-laser shots would show). Recorded, not ported.
 
 ## 7. Reachability and what remains
 
@@ -594,9 +613,10 @@ is the single F942 test.
 - The hit test uses an axis-aligned box in the system frame; F819 aligns the
   box with the target's axes. A centred shot is the same, so this only changes
   grazing shots and would need each target's orientation in `laser::Target`.
-- The original has no visible front-view muzzle (model 0x9c is behind the eye)
-  and the sound is the firing cue; keep it that way unless the owner wants a
-  port-only HUD flash. Model 156 is one pixel in the external view.
+- The Eagle's front wedge and every rear wedge differ from the original by a few
+  pixels at the foot of the view when the muzzle is behind the camera
+  (`docs/KNOWN_ISSUES.md`, "Still different"); with the gun ahead of the eye they
+  agree to 1-3 pixels. The Saker's front ray is pixel-exact.
 - F929's empty-energy recovery from fuel/cargo (`0x9907`) is ported (the Auto
   Refueller burns the hold's hydrogen/military fuel); the new game's 1 t pool
   is effectively unlimited while fuel remains.

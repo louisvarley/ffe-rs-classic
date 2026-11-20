@@ -22,6 +22,14 @@ pub struct Starport {
     pub bays: u16,
     pub pads: [u8; 8],
     pub door: u16,
+    /// `+0xdc`: how many police the station can still launch (F238/F239). `None` is
+    /// the value the object has when the system is made, `bays * 8 + 8`
+    /// ([`Starport::police_left`]).
+    #[serde(default)]
+    pub response: Option<i16>,
+    /// `+0xde`: the police clock F240 steps every frame ([`crate::police::frame`]).
+    #[serde(default)]
+    pub heat: u16,
 }
 
 /// The mode after a ship has asked for permission (F654): the door counts down.
@@ -61,6 +69,13 @@ impl Starport {
             door: 0xffff,
             ..Starport::default()
         }
+    }
+
+    /// `+0xdc`: the police this station can still launch. The object's creation
+    /// sets it to `+0xce * 8 + 8` (the code at `ffe.asm:64714`).
+    pub fn police_left(&self) -> i16 {
+        self.response
+            .unwrap_or((self.bays as i16).wrapping_mul(8).wrapping_add(8))
     }
 
     fn bay_range(&self) -> impl Iterator<Item = usize> {

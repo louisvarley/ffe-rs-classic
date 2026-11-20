@@ -2585,6 +2585,7 @@ fn the_place_list_is_stations_and_starports_in_system_order() {
         temperature: 0,
         size_word: 0,
         parent_frame: None,
+        orbit_centre: None,
     };
     let list = [
         body("A", Kind::Star),

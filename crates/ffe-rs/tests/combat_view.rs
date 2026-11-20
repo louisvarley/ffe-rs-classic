@@ -441,7 +441,7 @@ fn target_damage_readout_draws_f1099s_text() {
 
 #[test]
 #[ignore = "Local-only: needs the content cache (FFE_WORLD_CACHE)"]
-fn beam_is_model_156_at_the_gun_only_where_it_is_in_front() {
+fn f1776_model_156_draws_in_front_and_external_cameras() {
     let cache = cache();
     let mut screen = Screen::new(&cache).unwrap();
     let viewer = ModelViewer::new(&cache).unwrap();
@@ -451,11 +451,9 @@ fn beam_is_model_156_at_the_gun_only_where_it_is_in_front() {
     screen.lasers = Combat::new_game().lasers;
     let scale = ffe_rs::screen::model_scale(&viewer).unwrap();
 
-    // F1776 places the duplicate at the front gun, 1300/8 units ahead of the
-    // ship centre; the cockpit eye is 1500/8 ahead. The cone (model 0x9c, 64
-    // model units) is therefore 1600 units behind the front camera's near
-    // plane and F1479/F1680 cull it. The port must not clamp z to invent a
-    // flash below the crosshair.
+    // F1776 places model 156 at the front gun, 1300/8 ahead of the ship centre;
+    // the Eagle eye is 1500/8 ahead. Even with the origin behind the eye,
+    // F1776 still submits the model so its forward ray can cross into the view.
     let beam = combat::beam(&state, stats.as_ref(), views.mode, [0, 0]);
     let camera = ffe_rs::camera::Camera::new(&state, &views, stats.as_ref(), scale);
     let origin = camera.point(beam.origin).map(|v| v * scale);
@@ -463,29 +461,88 @@ fn beam_is_model_156_at_the_gun_only_where_it_is_in_front() {
         origin[2] < 0.0,
         "the front gun is not behind the eye: {origin:?}"
     );
-    let rows = beam.axes.map(|axis| camera.direction(axis));
-    let light = camera.direction(viewer.light_direction());
-    let rendered = viewer
-        .render_scene(combat::BEAM_MODEL, rows, origin, light)
-        .unwrap();
-    assert!(
-        rendered.shapes.is_empty(),
-        "model 0x9c rendered behind the front eye"
-    );
-
     draw(&mut screen, &state, views, Some(&viewer));
     let before = screen.logical_pixels().to_vec();
     screen.beam = Some(beam);
     draw(&mut screen, &state, views, Some(&viewer));
     save(&screen, "combat-beam-front.ppm");
-    // The executed original changes no pixel of the cockpit view when the
-    // player fires (FFE_FIRE_AT probe, combat.md §6.2), so the Eagle's ray,
-    // which starts behind its eye, must not spread a wedge over the view.
-    assert_eq!(
-        changed(&before, screen.logical_pixels(), 0, 320, 0, 158),
-        0,
-        "the front view drew a beam the original does not"
+    // F1776 still submits the Eagle's muzzle model in front view even though
+    // the gun origin is behind the cockpit eye; the view must show its ray.
+    let eagle_pixels = changed(&before, screen.logical_pixels(), 0, 320, 0, 158);
+    assert!(eagle_pixels > 0, "the Eagle's front-view laser was hidden");
+
+    // Hope's Saker has its front gun 50 units ahead of its cockpit eye; its
+    // model-156 beam should also appear in front view.
+    let mut saker = state.clone();
+    saker.ship = ffe_rs::navigation::DEFAULT_SHIP;
+    let saker_stats = viewer.ship_stats(saker.ship);
+    let saker_beam = combat::beam(&saker, saker_stats.as_ref(), views.mode, [0, 0]);
+    let saker_camera = ffe_rs::camera::Camera::new(&saker, &views, saker_stats.as_ref(), scale);
+    let saker_depth = saker_camera.point(saker_beam.origin)[2];
+    assert!(
+        saker_depth > 0.0,
+        "the Hope Saker's gun should be in front of its eye, depth={saker_depth}"
     );
+    let rows = saker_beam.axes.map(|axis| saker_camera.direction(axis));
+    let origin = saker_camera.point(saker_beam.origin).map(|v| v * scale);
+    let mut inputs = ffe_rs::model_viewer::AnimationInputs::original(
+        ffe_rs::screen::flight_tics(&saker),
+        0,
+        &viewer.shades(),
+    );
+    inputs.globals[4] = u16::from(screen.lasers[0]);
+    inputs.globals[37] = saker_beam.length;
+    let rendered = viewer
+        .render_scene_with(
+            combat::BEAM_MODEL,
+            rows,
+            origin,
+            saker_camera.direction(viewer.light_direction()),
+            &inputs,
+        )
+        .unwrap();
+    assert!(
+        !rendered.shapes.is_empty(),
+        "model 156 has no visible Hope Saker front beam at depth {saker_depth}"
+    );
+    screen.beam = None;
+    // The previous Eagle beam remains on Screen until explicitly cleared; use
+    // a clean no-beam frame for the Saker's pixel comparison.
+    screen.beam = None;
+    draw(&mut screen, &saker, views, Some(&viewer));
+    let saker_before = screen.logical_pixels().to_vec();
+    screen.beam = Some(saker_beam);
+    draw(&mut screen, &saker, views, Some(&viewer));
+    save(&screen, "combat-beam-front-saker.ppm");
+    let saker_pixels = changed(&saker_before, screen.logical_pixels(), 0, 320, 0, 158);
+    assert!(
+        saker_pixels > 0,
+        "the Hope Saker's front muzzle model was not drawn"
+    );
+    // The executed original (`docs/KNOWN_ISSUES.md`, 2026-11-19): the Hope
+    // Saker's front beam changes exactly 286 view pixels (a ray from the
+    // crosshair to the foot of the view, rows 79..157), and the Eagle's, whose
+    // gun is behind its eye, is a solid wedge of about 13,200 red pixels from
+    // the crosshair to both lower corners.
+    assert_eq!(
+        saker_pixels, 286,
+        "the Saker's front beam is not the original's"
+    );
+    assert!(
+        (12_500..=14_000).contains(&eagle_pixels),
+        "the Eagle's front beam is not the original's wedge: {eagle_pixels} changed pixels"
+    );
+    let pulse_frame = screen.logical_pixels().to_vec();
+    for code in [ffe_core::laser::BEAM_100MW, ffe_core::laser::MINING_30MW] {
+        screen.lasers[0] = code;
+        screen.beam = Some(saker_beam);
+        draw(&mut screen, &saker, views, Some(&viewer));
+        assert!(
+            pulse_frame != screen.logical_pixels(),
+            "model 156 ignored laser code {code:#04x}"
+        );
+    }
+    screen.lasers[0] = ffe_core::laser::PULSE_1MW;
 
     // The external camera is 49 m behind the ship, so the gun is in front of it
     // and F1776's model path runs; the cone is one pixel at that distance.

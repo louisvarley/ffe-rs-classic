@@ -302,11 +302,10 @@ owner wants it, the next step is to follow the F2 console action
    `+0x14f`).
 4. **Bulletin board entries**. Ported: `F622`/`F633`'s generation and daily
    update, the `+0x132` 18 x 24-byte array, `DATA_006170`, the templates
-   0x981a..0x982d and the embedded 0x99xx name/passage strings. Remaining:
-   F636's recent-systems wanted board, F637's missing-person destination picker
-   (F857's grid perturbation) and F641's special-offer commodity table, plus
-   the BBS entry's service flags. Those generators return no entry rather than
-   inventing one. The passenger/parcel and removal reply actions (F521/F534,
+   0x981a..0x982d and the embedded 0x99xx name/passage strings. Those generators have since been
+   ported draw for draw (F636, F637 with F857's destination picker, F641;
+   `docs/PORT_LOG.md`, 2026-11-11); the BBS entry's service flags remain.
+   The passenger/parcel and removal reply actions (F521/F534,
    the contract and 0x992a page) are the separate mission slice; the
    F524-F532 negotiation pages (permits, advance) are not ported, so the port
    accepts the offer directly rather than drawing the suggested-response

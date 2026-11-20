@@ -23,7 +23,10 @@ fn the_lave_start_is_docked_and_can_launch() {
     let mut nav = Navigator::new_game(&cache, 3).unwrap();
     let index = nav.docked.expect("the Lave start is docked");
     assert_eq!(nav.bodies[index].kind, ffe_rs::navigation::Kind::Station);
-    assert!(nav.sequence.is_none(), "docked is the end of the docking sequence");
+    assert!(
+        nav.sequence.is_none(),
+        "docked is the end of the docking sequence"
+    );
     nav.begin_launch().expect("the docked start can launch");
     let sequence = nav.sequence.expect("the launch stages begin");
     assert!(sequence.launching);

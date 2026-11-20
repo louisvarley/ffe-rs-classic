@@ -1339,3 +1339,43 @@ fn queued_faces_lines_and_points_carry_their_screen_points() {
     // The command-order record keeps faces without points (not queued there).
     assert!(result.emissions[0].screen.is_empty());
 }
+
+#[test]
+fn absolute_star_chain_sizes_bypass_depth_division() {
+    // DOS F1766 at file 0x51773 jumps past F1666 to 0x517cc.
+    // Packed 0x0140 decodes through F1474 to 0x8002: two screen pixels.
+    for depth in [-512, 0, 512, 8192, 65536] {
+        let mut vertices = Vertices::new(&LIVE_RECORDS, 4).unwrap();
+        let mut context = VertexContext::default();
+        let result = execute_live(
+            &bytes(&[24, 0x0aaa, 0x0140, 0x7f00, 0]),
+            &mut vertices,
+            &mut context,
+            &visibility(),
+            None,
+            live_instance([0, 0, depth], 0, 8),
+            16,
+        )
+        .unwrap();
+        assert_eq!(result.chains[0].size, 2, "depth {depth}");
+    }
+}
+
+#[test]
+fn faces_use_normal_zero_colour_at_emission_time() {
+    let lighting = [Normal {
+        culled: false,
+        colour: [9, 2, 1],
+    }];
+    let inputs = VisibilityContext {
+        normals: &lighting,
+        ..visibility()
+    };
+    // A textured face, F1762's unlit black normal-0 write, then the same face.
+    let stream = bytes(&[
+        3, 0x401c, 0x0200, 0x0400, 26, 0x2000, 0x0080, 3, 0x401c, 0x0200, 0x0400, 0,
+    ]);
+    let result = execute(&stream, 8, &mut VertexContext::default(), &inputs, None, 16).unwrap();
+    assert_eq!(result.emissions[0].shade, [9, 2, 1]);
+    assert_eq!(result.emissions[1].shade, [0, 0, 0]);
+}

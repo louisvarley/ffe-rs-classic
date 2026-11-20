@@ -195,6 +195,12 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// `DATA_008847`: the bodies generated, which the map's description page
+    /// reports as "major bodies".
+    pub fn major_bodies(&self) -> u8 {
+        self.objects
+    }
+
     /// The NUL-terminated name of an object.
     pub fn name_of(&self, object: usize) -> Vec<u8> {
         self.text(object)

@@ -65,15 +65,7 @@ planet's centre less F610's radius), F592/F596/F597's guidance and F587's turns
   target, so the target stays ahead. (A waypoint a fixed step ahead of the ship, the
   first version, held the ship to a crawl away from the planet with the target behind
   it.) F597's arrival takes precedence.
-- **Safety caps (port rule).** The near-world time-acceleration limit applies
-  only while the autopilot is engaged. In player-controlled flight, including
-  planetary takeoff, the meter keeps the F208-selected step as in JJFFE;
-  takeoff's F1013 altitude handoff does not change it. The near-station limit
-  (EXP-021: no step may carry the ship more than an eighth of the way to a
-  station in one frame; 100x inside 50 radii, 10x inside 10, 1x inside 2) also
-  holds manual flight, so a 1000x/10000x approach drops to a safe step before
-  the slot instead of docking in one frame. It is lifted during a surface
-  takeoff and the chosen step returns once the way is clear.
+- **No time-acceleration caps.** The meter keeps the F208-selected step everywhere, as in JJFFE: no limit near worlds, stations or starports, and none on takeoff. The original returns to 1x (F217) at docking completion (F750), on entering a station or pad state (F360), at event messages (F349), at the jump arrival (F1094) and at death; the port runs the same resets (EXP-021 is withdrawn).
 - **Station launch orientation.** The ship leaves a station with the station's
   current spun rows (F1088 copies them), not a level roll toward the docking
   axis, so it is straight with the door; the lift's inside view uses the same rows.
@@ -171,6 +163,20 @@ sky colour starts black each frame (the game sets it elsewhere), and the surface
 is the object's `+0xa0` only for bodies of the navigator. The planet is oriented by
 its object's rows (the spin is `clock[0] >> 17`, so they are identity until the clock
 passes 2^17 days). Looks checked by eye (`tests/planet_view.rs`, `FFE_SHOT_DIR`).
+
+**Far bodies (2026-11-17).** F1680 decides how an object is drawn from its distance class, `max(msb - 0xd, 0)` less the
+object's scale (`+0x7e`, 0 for a system body), against its model descriptor: at or past `desc[+0x20]` (the far class) nothing is
+drawn, from `desc[+0x28]` (the dot class) it is a dot (F1700 with the object flag), otherwise the model runs. The port used to
+send every planet through the model, so the other planets of a system, hundredths of a pixel across, drew nothing (Gateway 2 and
+4 from Hope; Gateway 5 and 7 drew a stray pixel). `Screen::draw_discs` now calls `ffe_core::model_animation::setup_object` for
+each body and acts on `Far` and `Dot`; `ffe_core::model_dot::object_dot` is F1700's object path: a lit body's colour is the
+descriptor's three nibbles plus the star's first shade, an unlit one (a star, `+0x24` bit 7) the nibbles alone; the projected
+radius `SpecialDiv(radius, depth)` picks the dot, and a size of 0 takes a finer size (`SpecialDiv(radius, depth >> 8)`, in 1/256
+pixel) through `DATA_007825` to a sprite record of -7..0. F1802 draws the halo sprite then the core sprite (F1609) at the point less
+one, the halo the colour a third of the way to the sky; those sprites are the plus-shaped glints the original shows. From Hope
+Gateway 1, 2, 4, 5 and 6 are glints and Gateway 7 is past its far class and not drawn (`tests/far_objects.rs`, local-only).
+Not ported: a lit body nine or more pixels across at its dot class is a shaded sphere in the original (F1700's polygon path);
+the port draws its model there. The descriptor fields come from cache v35 (`FORMATS.md`); an older cache keeps the old drawing.
 
 **The close-range fix (2026-10-25).** Two things used to make a planet disappear on
 approach. The flight view dropped every disc with `z <= radius` (the centre nearer than

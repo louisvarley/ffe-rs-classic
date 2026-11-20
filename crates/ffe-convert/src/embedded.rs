@@ -1054,6 +1054,47 @@ pub fn decode_dot_tables(bytes: &[u8], rva: u32) -> Result<EmbeddedTable, String
     })
 }
 
+/// One model's descriptor fields F1680 reads to draw a far object as a dot: the dwords at
+/// `+0x20` (the far class) and `+0x28` (the dot class) as bytes, then the colour bytes at
+/// `+0x24`..`+0x26`, padded to [`ffe_core::model_dot::OBJECT_MODEL_BYTES`].
+pub fn decode_model_object_dot(
+    bytes: &[u8],
+    table_rva: u32,
+    index: u32,
+) -> Result<[u8; ffe_core::model_dot::OBJECT_MODEL_BYTES], String> {
+    let (_, descriptor_offset) = model_descriptor(bytes, table_rva, index)?;
+    let record = range(bytes, descriptor_offset, 0x2c)?;
+    let far = u8::try_from(dword(record, 0x20)?).map_err(|_| "Far class exceeds a byte.")?;
+    let dot = u8::try_from(dword(record, 0x28)?).map_err(|_| "Dot class exceeds a byte.")?;
+    Ok([far, dot, record[0x24], record[0x25], record[0x26], 0, 0, 0])
+}
+
+/// The tables a far object's dot draws with: the sprite records `-7..=13` (`DATA_007784`
+/// less seven records, 378 bytes), the size map (`DATA_007825`, 33 bytes) and then the
+/// per-model descriptor records. Validated by [`ffe_core::model_dot::ObjectDotTables`].
+pub fn decode_object_dot_tables(
+    bytes: &[u8],
+    sprites_rva: u32,
+    size_map_rva: u32,
+    models: &[[u8; ffe_core::model_dot::OBJECT_MODEL_BYTES]],
+) -> Result<EmbeddedTable, String> {
+    use ffe_core::model_dot::{ObjectDotTables, OBJECT_TABLE_BYTES, SIZE_MAP_BYTES};
+    let section = DataSection::parse(bytes)?;
+    let sprites_len = OBJECT_TABLE_BYTES - SIZE_MAP_BYTES;
+    let sprites = section.offset(sprites_rva, sprites_len)?;
+    let size_map = section.offset(size_map_rva, SIZE_MAP_BYTES)?;
+    let mut block = range(bytes, sprites, sprites_len)?.to_vec();
+    block.extend_from_slice(range(bytes, size_map, SIZE_MAP_BYTES)?);
+    for model in models {
+        block.extend_from_slice(model);
+    }
+    ObjectDotTables::new(&block)?;
+    Ok(EmbeddedTable {
+        source_offset: sprites,
+        bytes: block,
+    })
+}
+
 /// The four star light-point tables (`DATA_007820`, `7821`, `7822`, `7828`; RVAs), 14 dwords
 /// each, concatenated.
 pub fn decode_star_point_tables(bytes: &[u8], rvas: [u32; 4]) -> Result<EmbeddedTable, String> {

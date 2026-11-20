@@ -139,7 +139,7 @@ The map is a separate console page, not the flight page with a map on top:
   | Key | Action | Console image |
   |---|---|---|
   | **F5** | re-show the map controls page (F834; also leaves details/picture) | 0x24 |
-  | **F6** | select/reset the controls row | 0x23 |
+  | **F6** | the system map (F966; `docs/notes/system-map.md`); the controls row's 0x23 icon | 0x23 |
   | **F7** | details page | 0x22 |
   | **F8** | picture mode | 0x21 |
   | **F9** | details with next | 0x22 + 0x20 |
@@ -164,9 +164,15 @@ The map is a separate console page, not the flight page with a map on top:
 - **Hot areas**: F969 adds `DATA_007241`'s one extra area,
   `(268,156)-(319,177)`, action `0x80`; F840 itself ignores action `0x80`, so
   the port records the area (`MAP_EXTRA_HOT_AREA`) but does not route it.
-- **Not yet**: the details page (F842) and picture mode (F844-F849) are still
-  later slices. The port lights their original buttons and reports
-  "not ported yet" instead of inventing a screen.
+- **F7 description page (F842, ui-25)**: done 2026-11-18. `ffe_rs::map_pages::description`
+  builds the page from the selected star (the diagram of F878's objects through
+  `ffe_core::map_diagram`, the body count, and the F869 description string) and
+  `Screen::draw_map_page` draws it over F956's cabin; the console date and the
+  star's summary stay at the lower right. F7 needs a selected star, F6 returns to the
+  map. **F9/F10 (ui-26)**: done 2026-11-19 (`map_pages::economy` and `people`; F870's
+  stock flags give the five goods columns, F869's allegiance word and population byte the
+  people page). **Click on a body (ui-27)** and **F8 picture mode (ui-28)**: done
+  2026-11-19 (`map_pages::body_info`, `body_at` and `picture`; see the PORT_LOG entry).
 
 The port's arrow scrolling, Page Up/Down and +/- zoom, mouse drag, `C`
 recentre, `G`/F3-icon entry and `H`/Enter jump are retained alongside the
@@ -177,6 +183,32 @@ and `the_map_key_script_selects_reimages_and_jumps` in
 
 ## Not done
 
-The drawn hyperspace jump scene (F908's mode 4/F909's F148/F912; the destination, gates and arrival are ported), the details
-page (F842), picture mode (F844-F849), the string engine's templates (the fuel line's number is plain), the textured text
+The drawn hyperspace jump scene (F908's mode 4/F909's F148/F912; the destination, gates and arrival are ported), picture mode (F844-F849), the string engine's templates (the fuel line's number is plain), the textured text
 colour, the mouse's hover pick of a star, and the lit-sphere branch of F1700.
+
+## Source map of the pages (work items ui-25 to ui-28, all done)
+
+Read from `jjffe-master/ffe.asm` on 2026-11-18, from the owner's captures of the
+original. F843 (`58326`) is the page's input handler; the console icons left to
+right are:
+
+| Icon | Key / action | Page | Source |
+|---|---|---|---|
+| 0x22 four small planets | F7, `0xf7` | The system description over the body diagram: the first line (string `0x84a0`, colour 18, at 95,10 with the body count) and F1399's wrapped text (`DATA_008961`, colour 17, 300 wide) | F842 (`58248`); `0x84b3` when no star is selected |
+| 0x21 hyperspace cloud | F8, `0xf8` | Picture mode: names of the nearby stars over a grey noise sky, mode byte 2 | F844-F849 (`58995`-`59417`) |
+| 0x20 graph | F9, `0xf9` | Economy: five columns (major imports, minor imports, major exports, minor exports, illegal goods), headings from `0x84b4`, goods from the `F870` stock string `+0x8e00` | F843 branch `JUMP_003488` |
+| 0x1f people | F10, `0xfa` | People: government, economy, allegiance, population, sector code, system number (strings `0x84b5`/`0x84b6`, the F869 bytes and the sector words) | F843 branch `JUMP_003495` |
+
+Every page but picture mode sits over F956's cabin backdrop with the system's body
+diagram on top: F850 resets the hot areas, draws F956 and calls F851, which walks
+the system's object list (`F878`'s output for the selected star, from `DATA_008778`)
+and blits one sprite per body from `DATA_006822` (20-byte records, width, height,
+bitmap) through `F1623`, adding a hot square `0x80 + index` for each. A click on one
+(F843's `0x80..0xbc` branch) writes, at 82,125 or 95,125 in colour 18, the body's
+name and type, then its mass (`0x84a1`, Earth masses), surface temperature
+(`0x84a4`-`0x84a6` by class, in degrees C), major starports (`0x84a2`/`0x84a3`),
+orbital period (years) and orbital radius (A.U.), all through F830's template
+expansion (`F1347`, which the port does not have: `system_string` returns raw bytes).
+Needs: F1347 and F830's argument forms, F851's table and sprites, F870's stock string
+parser, the unit conversions `F1482`/`F1494`/`F1515`, and F1589's shadowed writer
+with F1399's wrapping (the port has both in `intro_text.rs`).

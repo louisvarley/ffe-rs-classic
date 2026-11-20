@@ -386,3 +386,33 @@ fn malformed_continuation_records_are_rejected() {
     board.1 = nav.bodies.len();
     assert!(Navigator::from_save(&cache, &bad).is_err());
 }
+
+#[test]
+#[ignore = "Local-only: needs FFE_WORLD_CACHE"]
+fn the_daily_draws_resume_to_the_same_pair_boards_and_jobs() {
+    // PAR-17/18: F633's draws depend on every board's entry and ship counts, so
+    // a save taken before the first new day has to carry them: the resumed
+    // navigator and the uninterrupted one then draw the same days.
+    let cache = cache();
+    let mut nav = Navigator::new_game(&cache, 1).unwrap();
+    let at = nav.station().map(|(_, at)| at).unwrap();
+    let forward = nav.bodies[nav.docked.unwrap()].orientation[2];
+    nav.spawn_traffic(&cache, at, forward);
+    assert!(!nav.pair_boards.is_empty());
+    let mut loaded = resume(&cache, &nav);
+    assert_eq!(loaded.pair_boards, nav.pair_boards);
+    for day in 1..=5 {
+        // Midnight is twelve hours into the new game, then a day apart.
+        let seconds = 43_200.0 + 86_400.0 * f64::from(day - 1) + 60.0;
+        for navigator in [&mut nav, &mut loaded] {
+            navigator.clock = navigator.start_clock + seconds;
+            navigator.tick_days(&cache);
+        }
+        assert_eq!(loaded.random, nav.random, "day {day}");
+        assert_eq!(loaded.pair_boards, nav.pair_boards, "day {day}");
+        assert_eq!(loaded.bbs_jobs, nav.bbs_jobs, "day {day}");
+        assert_eq!(loaded.bbs_remembered, nav.bbs_remembered, "day {day}");
+    }
+    // The days really drew: the pair is not where F688 left it.
+    assert_ne!(nav.random, Navigator::new_game(&cache, 1).unwrap().random);
+}

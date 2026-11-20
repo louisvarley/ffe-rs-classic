@@ -17,6 +17,85 @@
 //! pure so the presets can be tested without a window.
 use minifb::Key;
 
+/// The character a key types in the save menu's name box: letters (capitals
+/// with Shift), digits, space, `-` and (with Shift) `_`. `None` for every other
+/// key, so nothing outside [`crate::saves::save_name_error`]'s alphabet can be typed.
+pub fn save_name_char(key: Key, shift: bool) -> Option<char> {
+    let letters = "abcdefghijklmnopqrstuvwxyz";
+    let letter_keys = [
+        Key::A,
+        Key::B,
+        Key::C,
+        Key::D,
+        Key::E,
+        Key::F,
+        Key::G,
+        Key::H,
+        Key::I,
+        Key::J,
+        Key::K,
+        Key::L,
+        Key::M,
+        Key::N,
+        Key::O,
+        Key::P,
+        Key::Q,
+        Key::R,
+        Key::S,
+        Key::T,
+        Key::U,
+        Key::V,
+        Key::W,
+        Key::X,
+        Key::Y,
+        Key::Z,
+    ];
+    if let Some(index) = letter_keys.iter().position(|candidate| *candidate == key) {
+        let letter = letters.as_bytes()[index] as char;
+        return Some(if shift {
+            letter.to_ascii_uppercase()
+        } else {
+            letter
+        });
+    }
+    let digit_keys = [
+        Key::Key0,
+        Key::Key1,
+        Key::Key2,
+        Key::Key3,
+        Key::Key4,
+        Key::Key5,
+        Key::Key6,
+        Key::Key7,
+        Key::Key8,
+        Key::Key9,
+    ];
+    let pad_keys = [
+        Key::NumPad0,
+        Key::NumPad1,
+        Key::NumPad2,
+        Key::NumPad3,
+        Key::NumPad4,
+        Key::NumPad5,
+        Key::NumPad6,
+        Key::NumPad7,
+        Key::NumPad8,
+        Key::NumPad9,
+    ];
+    if let Some(digit) = digit_keys.iter().position(|candidate| *candidate == key) {
+        return (!shift).then(|| char::from(b'0' + digit as u8));
+    }
+    if let Some(digit) = pad_keys.iter().position(|candidate| *candidate == key) {
+        return Some(char::from(b'0' + digit as u8));
+    }
+    match key {
+        Key::Space => Some(' '),
+        Key::Minus => Some(if shift { '_' } else { '-' }),
+        Key::NumPadMinus => Some('-'),
+        _ => None,
+    }
+}
+
 use crate::camera::ViewMode;
 use crate::flight::Controls as FlightControls;
 use crate::original_flight::Keys as OriginalKeys;
@@ -495,6 +574,31 @@ pub fn turret_mouse(preset: Preset, mouse: MouseSteer) -> (i32, i32) {
 
 #[cfg(test)]
 mod tests {
+    use super::save_name_char;
+
+    #[test]
+    fn the_save_name_box_types_only_the_allowed_characters() {
+        assert_eq!(save_name_char(Key::A, false), Some('a'));
+        assert_eq!(save_name_char(Key::Z, true), Some('Z'));
+        assert_eq!(save_name_char(Key::Key7, false), Some('7'));
+        assert_eq!(save_name_char(Key::Key7, true), None);
+        assert_eq!(save_name_char(Key::NumPad3, false), Some('3'));
+        assert_eq!(save_name_char(Key::Space, false), Some(' '));
+        assert_eq!(save_name_char(Key::Minus, false), Some('-'));
+        assert_eq!(save_name_char(Key::Minus, true), Some('_'));
+        for key in [
+            Key::Period,
+            Key::Slash,
+            Key::Backslash,
+            Key::Enter,
+            Key::F5,
+            Key::Tab,
+        ] {
+            assert_eq!(save_name_char(key, false), None, "{key:?}");
+            assert_eq!(save_name_char(key, true), None, "{key:?}");
+        }
+    }
+
     use super::*;
     use crate::prefs::Prefs;
 

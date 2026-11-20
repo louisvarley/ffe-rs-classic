@@ -120,6 +120,28 @@ impl Source {
         Source::Script,
     ];
 
+    /// Whether the entry goes through `F349`, which calls `F217` (time
+    /// acceleration back to 1x, unless in hyperspace) before `F351` writes it
+    /// (`ffe.asm:27059-27070`). Its callers are the traffic, fine, contract,
+    /// market, combat and ship-warning writers (F236, F246/F247, F289-F307,
+    /// F323/F324, F656, F867, F910, F929-F944, F1022/F1023/F1033, F1097); the
+    /// station prompt, the journal notice (F89's direct `F271`) and the replace
+    /// readouts (`F352`) do not. `F273` times the entry on accelerated tics, so
+    /// without the reset a message posted at 100x folds away in the next frame.
+    pub fn resets_time_acceleration(self) -> bool {
+        matches!(
+            self,
+            Source::Docking
+                | Source::Launch
+                | Source::Legal
+                | Source::Mission
+                | Source::Combat
+                | Source::Trade
+                | Source::Ship
+                | Source::Script
+        )
+    }
+
     /// The DOS FFE label/line that writes the entry.
     pub fn citation(self) -> &'static str {
         match self {
@@ -732,6 +754,35 @@ mod tests {
         log.push("Launch permission granted.", "1-Jan-3200 12:01");
         frames(&mut log, &font, 10, 0);
         assert_eq!(log.scroll(), -0x18);
+    }
+
+    #[test]
+    fn a_message_at_high_acceleration_folds_at_once_unless_time_is_reset() {
+        let font = font();
+        let mut log = MessageLog::new();
+        log.record(Source::Ship, "WARNING: Undercarriage down.", "1-Jan-3250");
+        // At 100x one frame is 85,048 tics: three frames pass the five seconds
+        // and the entry is folded to the bare header before it was readable.
+        frames(&mut log, &font, 40, 85_048);
+        assert_eq!(log.scroll(), -0x20);
+        // F349 puts time back to 1x first, so the same warning is read for its
+        // five seconds (about 294 frames of 844 tics) before it folds.
+        assert!(Source::Ship.resets_time_acceleration());
+        let mut log = MessageLog::new();
+        log.record(Source::Ship, "WARNING: Undercarriage down.", "1-Jan-3250");
+        frames(&mut log, &font, 250, 844);
+        assert_eq!(log.scroll(), -0x18);
+        frames(&mut log, &font, 100, 844);
+        assert_eq!(log.scroll(), -0x20);
+        // The station prompt, the journal notice and the replace readouts do not.
+        for source in [
+            Source::Station,
+            Source::Journal,
+            Source::Autopilot,
+            Source::Target,
+        ] {
+            assert!(!source.resets_time_acceleration(), "{source:?}");
+        }
     }
 
     #[test]

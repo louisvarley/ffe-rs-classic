@@ -78,10 +78,6 @@ pub struct SurfacePort {
 /// view space is 32-bit, and an orbital city is under a pixel beyond it.
 const STATION_DRAW_RANGE: f64 = 2.0e9;
 
-/// The farthest a dust cloud's view position may be before it is shifted down (with its
-/// scale) to fit the viewer's 32-bit view space, as F1680 does for every far object.
-const DUST_VIEW_LIMIT: f64 = 1.0e9;
-
 /// The lift scene of a docking or launching stage (`ffe_core::lift`), drawn in the
 /// front view after the outside world (or alone, inside the station).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +109,18 @@ pub struct MapScene {
     pub date: String,
     /// The selected star's description, wrapped to the console text's width here.
     pub info: String,
+    /// F7-F10's page (the system description, ...): drawn over the cabin in
+    /// place of the 3D map.
+    pub page: Option<crate::map_pages::Page>,
+}
+
+/// The system map page as the screen draws it (`system_map`): its frame over the
+/// cabin art and the console's date.
+#[derive(Debug, Clone, Default)]
+pub struct SystemMapScene {
+    pub frame: crate::system_map::Frame,
+    /// The game's date and time, in green at the top of the console text.
+    pub date: String,
 }
 
 /// One commodity line of the station's market screen.
@@ -287,8 +295,8 @@ pub const MAP_BUTTONS: [(i32, i32, &str); 2] = [(2, 62, "SYSTEMS"), (66, 150, "T
 
 /// F1775's background object: the nebula and star field (model 315).
 const BACKGROUND_MODEL: u32 = 0x13b;
-/// The depth the background object is drawn at (F959's intro object depth).
-const BACKGROUND_DEPTH: f64 = 0x14820 as f64;
+/// Unverified port depth; DOS F1775 supplies 0x200 directly (see parity-07 handoff).
+const BACKGROUND_DEPTH: f64 = 0x2000 as f64;
 /// F318's title colour (`DATA_008673`, the executed boot's index 34).
 const STATUS_TITLE: u8 = 34;
 
@@ -461,7 +469,6 @@ pub struct Screen {
     font: BitmapFont,
     palette: [u32; 128],
     indexed: Box<[u8; 64000]>,
-    stars: Vec<[f64; 3]>,
     /// The flight view's background: the original's space colour
     /// (`DATA_008815..817`, set by the Graphic Detail page), RGB.
     pub sky: u32,
@@ -479,6 +486,9 @@ pub struct Screen {
     pub lock_external: bool,
     /// The Others page's "Space dust, clouds etc": off leaves F1035's dust clouds out.
     pub dust_visible: bool,
+    /// F1751's detail words (`DATA_008812/8813`) from the Graphics page's "Level of Shape
+    /// Detail" radio (`prefs::shape_detail_words`); the default High reads `[1, 1]`.
+    pub shape_detail: [i32; 2],
     /// Classic: the flight view's objects' shapes with their F1777 depth keys, in allocation
     /// order, while the original's one queue is being filled (see [`Self::flush_object_queue`]).
     object_queue: Option<Vec<(u32, Shape)>>,
@@ -542,6 +552,8 @@ pub struct Screen {
     pub combat_readouts: Vec<crate::combat_computer::Readout>,
     /// The galaxy map to draw instead of the flight view, when it is open.
     pub galaxy: Option<MapScene>,
+    /// The original's 3D system map, drawn in place of the galaxy map.
+    pub system_map: Option<SystemMapScene>,
     /// The galaxy map's console selection (`F834`/`F840`), applied on top of
     /// the flight page while [`Screen::galaxy`] is set.
     pub map_console: crate::console::MapConsole,
@@ -597,6 +609,8 @@ pub struct Screen {
     icons: Vec<Option<IndexedImage>>,
     /// The navigation list's marker, primary bitmap 0x31.
     marker: Option<IndexedImage>,
+    /// The primary bitmaps F851's body diagram blits (ids 11 to 42).
+    diagram: Vec<Option<IndexedImage>>,
     /// The docked screen's row button and arrows: primary bitmaps 0x2e, 0x2f
     /// and 0x30 (F328/F330).
     dock_icons: [Option<IndexedImage>; 3],
@@ -738,6 +752,9 @@ impl Screen {
             .collect();
         // The navigation list's 10x10 marker button (bitmap 0x31, primary table).
         screen.marker = indexed_bitmap(cache, crate::console::NAV_MARKER_BITMAP);
+        screen.diagram = (0..=42)
+            .map(|id| indexed_bitmap(cache, &format!("base:bitmap/primary/{id:03}")))
+            .collect();
         screen.mastheads = (0..6)
             .map(|index| indexed_bitmap(cache, &format!("base:bitmap/primary/{index:03}")))
             .collect();
@@ -974,14 +991,6 @@ impl Screen {
     ) -> Result<Self, String> {
         let font = BitmapFont::new(font)?;
         let cabin = decode_cabin(cabin_png)?;
-        let mut seed = 7u32;
-        let mut number = || {
-            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            f64::from(seed) / f64::from(u32::MAX) * 2.0 - 1.0
-        };
-        let stars = (0..800)
-            .map(|_| [number() * 10000.0, number() * 10000.0, number() * 10000.0])
-            .collect();
         Ok(Self {
             pixels: vec![0; WIDTH * HEIGHT],
             frame: vec![0; LOGICAL_WIDTH * LOGICAL_HEIGHT],
@@ -991,7 +1000,6 @@ impl Screen {
             font,
             palette,
             indexed: Box::new([0; 64000]),
-            stars,
             // `FUNC_000219_SysMenuInit`'s default: "Light Blue" (4), drawn as
             // the captured quantised palette entry (`#0c0c4c`).
             sky: prefs::space_colour_rgb(4),
@@ -1000,6 +1008,7 @@ impl Screen {
             stars_visible: true,
             lock_external: true,
             dust_visible: true,
+            shape_detail: [1, 1],
             object_queue: None,
             discs: Vec::new(),
             stations: Vec::new(),
@@ -1025,6 +1034,7 @@ impl Screen {
             labels: Vec::new(),
             combat_readouts: Vec::new(),
             galaxy: None,
+            system_map: None,
             map_console: crate::console::MapConsole::default(),
             has_lock: false,
             lasers: [0; 4],
@@ -1053,6 +1063,7 @@ impl Screen {
             lock: String::new(),
             icons: Vec::new(),
             marker: None,
+            diagram: Vec::new(),
             dock_icons: [None, None, None],
             prefs_on: None,
             prefs_off: None,
@@ -1098,14 +1109,16 @@ impl Screen {
     ) {
         let scale = model_scale(scene).unwrap_or(DEFAULT_MODEL_SCALE);
         let rows = beam.axes.map(|axis| camera.direction(axis));
-        // F1776 copies the firing object (`F1533`, 0x152 bytes, including the
-        // render scale `+0x7e`) and only changes the model to 0x9c, so the beam
-        // is drawn at the firing ship's scale, not model 156's own (17), which
-        // is 512 times larger. The Eagle's gun is behind its eye: at the right
-        // scale the muzzle cone is behind the near plane and the thin ray adds
-        // nothing, as in the executed original (no beam pixel in the Eagle's
-        // front view, `docs/KNOWN_ISSUES.md`). The old depth clamp hid the
-        // oversized beam and is gone.
+        // F1776 copies the firing object (`F1533`, 0x152 bytes) and changes only
+        // the model to 0x9c. The copy's `+0x7e` is the object's extra render
+        // shift, which is 0 for the player (read from the executed original at
+        // the shot, `docs/KNOWN_ISSUES.md`), not the ship's model scale, so the
+        // beam is drawn at model 156's *own* scale 17, where its vertices are in
+        // position units and the ray ends on the hit point. Drawing it at the
+        // ship's scale 8 made the beam 512 times too small: a short stub that
+        // pointed wherever the ship did. At the right scale the Eagle's front
+        // view shows the original's large wedge from the crosshair to the foot
+        // of the view, and the Saker's a one-pixel ray.
         let view_origin = camera.point(beam.origin);
         let origin = view_origin.map(|v| v * scale);
         let light = self.scene_light(scene, camera);
@@ -1118,16 +1131,14 @@ impl Screen {
         // so a hit's `distance >> 7` ends it on the target.
         inputs.globals[4] = u16::from(self.lasers[beam.mount]);
         inputs.globals[37] = beam.length;
-        if let Ok(frame) =
-            scene.render_scene_with_scale(
-                crate::combat::BEAM_MODEL,
-                scene.find(state.ship).map(|model| model.scale),
-                rows,
-                origin,
-                light,
-                &inputs,
-            )
-        {
+        if let Ok(frame) = scene.render_scene_with_scale(
+            crate::combat::BEAM_MODEL,
+            None,
+            rows,
+            origin,
+            light,
+            &inputs,
+        ) {
             self.jitter.cursor = frame.jitter;
             self.draw_frame(scene, &frame);
         }
@@ -1353,6 +1364,37 @@ impl Screen {
         order.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (z, disc) in order {
             let light = disc.light;
+            // F1680's distance decision: past the model's far class nothing is drawn, and from
+            // its dot class the body is a dot (a plus-shaped glint for a planet or moon, a
+            // particle for a star), not a model a hundredth of a pixel across.
+            if let (Some((model, _)), Some(viewer)) = (disc.model, viewer) {
+                if let Some(descriptor) = viewer.object_descriptor(model) {
+                    match far_object(camera, disc.centre, &descriptor) {
+                        ffe_core::model_animation::Draw::Far { .. } => continue,
+                        ffe_core::model_animation::Draw::Dot {
+                            screen,
+                            depth,
+                            radius,
+                            ..
+                        } => {
+                            let classes = viewer.object_model(model);
+                            let (Some(screen), Some(classes)) = (screen, classes) else {
+                                continue;
+                            };
+                            match viewer.object_dot_frame(classes, screen, radius, depth) {
+                                Ok(Some(frame)) => {
+                                    self.draw_frame(viewer, &frame);
+                                    continue;
+                                }
+                                Ok(None) => continue,
+                                // A shaded sphere the port cannot draw: the model instead.
+                                Err(_) => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             // The real surface when the model fits the view space at this range.
             if let (Some((model, seed)), Some(viewer)) = (disc.model, viewer) {
                 // The planet's radius in the model's units is its surface axes' length;
@@ -2261,7 +2303,11 @@ impl Screen {
         }
         let stats = scene.and_then(|scene| scene.ship_stats(state.ship));
         let turrets = stats.is_some_and(|stats| stats.gun_mounts > 2);
-        if state.mode != Mode::Docked || self.pad_services {
+        // Docked, the status screen (F2) puts the flight console back, as the
+        // executed original does.
+        let flight_console =
+            state.mode != Mode::Docked || self.pad_services || self.status_backdrop.is_some();
+        if flight_console {
             // F272's order: primary 43 panel, the scanner globe (secondary
             // 254..261), then F261's buttons, then F270's gauges. F274's
             // contacts come last, after the view (see `draw_scanner_contacts`).
@@ -2274,7 +2320,7 @@ impl Screen {
                 systems.mounts = systems.mounts.max(3);
             }
             self.console.apply_flight(view, &views.console, &systems);
-            if self.galaxy.is_some() {
+            if self.galaxy.is_some() || self.system_map.is_some() {
                 // F834/F840: the map's page replaces the view row while the
                 // screen buttons, meter, scanner and lamps stay visible.
                 self.console.apply_map(&self.map_console);
@@ -2291,7 +2337,7 @@ impl Screen {
                 icon.blit(&mut self.indexed, button.x, button.y);
             }
         }
-        if state.mode != Mode::Docked {
+        if state.mode != Mode::Docked || self.status_backdrop.is_some() {
             self.draw_gauges();
         }
         // The lift stages leave the view as the last frame left it (below), so
@@ -2315,6 +2361,11 @@ impl Screen {
             // left in `DATA_008814..8817`; a planet's haze overrides the space
             // colour until the eye is out of it again.
             self.frame[..320 * VIEW_HEIGHT].fill(self.surface_sky.unwrap_or(self.sky));
+        }
+        if let Some(page) = self.system_map.take() {
+            self.draw_system_map(&page);
+            self.present();
+            return;
         }
         if let Some(map) = self.galaxy.take().filter(|_| scene.is_some()) {
             self.draw_galaxy(scene.unwrap(), &map);
@@ -2384,36 +2435,31 @@ impl Screen {
             }
             self.jitter.cursor = self.jitter.start;
             let world = self.lift.as_ref().is_none_or(|lift| lift.world);
-            // F1052 draws F1775's background only while the previous frame's
-            // background flag is clear: model 0x13b, the nebula and star field
-            // the intro also shows, turned with the world. The port draws it at
-            // the intro object's depth (F959's 0x14820), where the model's
-            // nebula band renders; F1775's own 0x200 is a cached position this
-            // renderer does not reproduce. The port's star points stay as well,
-            // because the model's star field child is sparse here.
+            // F1052 gates the background on stars and the preceding frame's haze.
+            // DOS F1775 (file 0x51cac) transposes the camera basis through F1665
+            // (0x4ac60), then F1683 (0x4c164) copies (0, 0, 0x200) unchanged.
             if world && self.stars_visible && self.surface_sky.is_none() {
                 if let Some(scene) = scene {
-                    let rows = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-                        .map(|axis| camera.direction(axis));
-                    let inputs = AnimationInputs::original(0, 0, &scene.shades());
+                    let world_axes = self
+                        .discs
+                        .iter()
+                        .find(|disc| disc.star)
+                        .map_or(camera.axes, |star| star.orientation);
+                    let rows = world_axes.map(|axis| camera.direction(axis));
+                    let origin = camera
+                        .direction(camera.axes[2])
+                        .map(|component| component * BACKGROUND_DEPTH);
+                    let mut inputs = AnimationInputs::original(0, 0, &scene.shades());
+                    inputs.depth_detail = true;
+                    inputs.detail = self.shape_detail;
                     if let Ok(frame) = scene.render_scene_with(
                         BACKGROUND_MODEL,
                         rows,
-                        [0.0, 0.0, BACKGROUND_DEPTH],
+                        origin,
                         scene.light_direction(),
                         &inputs,
                     ) {
                         self.draw_frame(scene, &frame);
-                    }
-                }
-            }
-            for index in 0..self.stars.len() {
-                if !world || !self.stars_visible || self.surface_sky.is_some() {
-                    break;
-                }
-                if let Some((x, y)) = camera.project(self.stars[index], false) {
-                    if y < 158 {
-                        self.pixel(x, y, 12);
                     }
                 }
             }
@@ -2516,15 +2562,7 @@ impl Screen {
                 self.lift = Some(lift);
             }
             if let Some(beam) = self.beam {
-                if cockpit_beam_visible(view, beam.mount) {
-                    // Keep the cockpit ray in view space: some guns sit behind
-                    // the eye, where the muzzle model produces a clipped wedge.
-                    // Converge on the gunsight, leaving its centre readable.
-                    for x in [48, 272] {
-                        self.line_value((x, 157), (160, 80), 0xff5020);
-                        self.line_value((x + 1, 157), (161, 80), 0xffe0a0);
-                    }
-                } else if beam_visible(view) {
+                if beam_visible(view) {
                     if let Some(scene) = scene {
                         self.draw_beam(scene, state, &beam, &camera);
                     }
@@ -2565,7 +2603,7 @@ impl Screen {
         // top bar, controls button, SPEED line and status/map/autopilot block are
         // gone (they covered the shields/hull rows, the Autopilot and Set/Act
         // lines, and the lift's lower rows).
-        if state.mode == Mode::Flight {
+        if state.mode == Mode::Flight || self.status_backdrop.is_some() {
             if let Some(backdrop) = self.status_backdrop.clone() {
                 self.draw_status_backdrop(&backdrop, scene);
             }
@@ -2644,6 +2682,78 @@ impl Screen {
                 self.prefs_bullet(row.x - 9, row.y + 2);
             }
         }
+        self.present();
+    }
+
+    /// A pick-a-commander list (Load, Delete, confirmations) drawn like the
+    /// Escape preference pages: the same palette-3 upper view over the console,
+    /// the 0x2c/0x2d icons, shadowed labels, a heading and sub-heading in the
+    /// pages' colours, and the keyboard bullet. `rows` are (label, selected).
+    pub fn draw_pref_list(
+        &mut self,
+        heading: &str,
+        subheading: &str,
+        rows: &[(String, bool)],
+        footer: &str,
+    ) {
+        self.indexed.fill(0);
+        self.panel.blit(&mut self.indexed, 0, VIEW_HEIGHT as i32);
+        for y in VIEW_HEIGHT..LOGICAL_HEIGHT {
+            for x in 0..LOGICAL_WIDTH {
+                let index = self.indexed[y * LOGICAL_WIDTH + x];
+                self.frame[y * LOGICAL_WIDTH + x] = self.palette[usize::from(index)];
+            }
+        }
+        self.rect(0, 0, 320, VIEW_HEIGHT, 3);
+        self.shadow_text(32, 8, heading, 17);
+        self.shadow_text(32, 18, subheading, 16);
+        for (index, (label, selected)) in rows.iter().enumerate() {
+            let y = 28 + 10 * index as i32;
+            self.prefs_icon(32, y, *selected);
+            let text: String = label.chars().take(30).collect();
+            self.shadow_text(48, y, &text, 15);
+            if *selected {
+                self.prefs_bullet(23, y + 2);
+            }
+        }
+        self.shadow_text(32, 140, footer, 16);
+        self.present();
+    }
+
+    /// The save menu's name entry: the preference list's page with one text
+    /// box. `name` is what the player types; `suffix` (`.json`) follows it inside
+    /// the box in the sub-heading's red and is never part of the edit. `caret`
+    /// draws the insertion bar after the name.
+    pub fn draw_pref_textbox(
+        &mut self,
+        heading: &str,
+        subheading: &str,
+        name: &str,
+        suffix: &str,
+        caret: bool,
+        footer: &str,
+    ) {
+        self.draw_pref_list(heading, subheading, &[], footer);
+        let (x, y, width, height) = (32usize, 30usize, 256usize, 14usize);
+        self.rect(x, y, width, height, 15);
+        self.rect(x + 1, y + 1, width - 2, height - 2, 0);
+        let width_of = |screen: &Self, text: &str| -> usize {
+            text.bytes()
+                .map(|code| {
+                    screen
+                        .font
+                        .glyph(code)
+                        .map_or(0, |glyph| glyph.advance as usize)
+                })
+                .sum()
+        };
+        let text_y = y + 3;
+        self.shadow_text(x as i32 + 4, text_y as i32, name, 15);
+        let after_name = x + 4 + width_of(self, name);
+        if caret {
+            self.rect(after_name + 1, y + 3, 1, 8, 18);
+        }
+        self.shadow_text(after_name as i32 + 4, text_y as i32, suffix, 16);
         self.present();
     }
 
@@ -3424,18 +3534,34 @@ impl Screen {
             let mut effect_scale = effect.scale;
             // F1680's shift, which F1777's depth key puts back (`+0x130`).
             let mut key_scale = 0;
-            // F1680 shifts a far object's view position right and takes the same shift off
-            // its scale, so any distance fits the 32-bit view space. Dust needs it: under
-            // time acceleration F1517 leads the cloud `2^shift` times as far ahead (10^9..10^10
-            // mm at 1000x and 10000x), which the plain range test below dropped, so the dust
-            // vanished at those steps.
+            // F1680 (`ffe.asm:101900-102027`) keeps any distance inside the 32-bit view space:
+            // `shift = max(msb - 0x1c, 0)` of the relative position is taken off the position
+            // first, then `e = desc[+0x18] + obj[+0x7e] - shift` either lowers the scale (`e`
+            // negative: `+0x148 = max(desc[+0x14] + e, 0)`) or shifts the position right by `e`
+            // (scale unchanged). Either way size over depth is `2^(scale + bias)` times the
+            // model's own. Dust needs both halves: the cloud's `+0x7e` word is the F1035 jitter
+            // plus the speed class and the time-acceleration shift less 7, so a fast ship's
+            // clouds are many powers of two bigger (`+0x7e` up to about 25), and under time
+            // acceleration F1517 leads them `2^shift` times as far ahead. `effect.scale` is
+            // `desc[+0x14] + obj[+0x7e]`; model 0x6d's `desc[+0x18]` is 0.
             if effect.model == ffe_core::dust::MODEL {
-                let reach = origin.iter().fold(0.0f64, |far, v| far.max(v.abs()));
-                if reach > DUST_VIEW_LIMIT {
-                    let k = (reach / DUST_VIEW_LIMIT).log2().ceil() as u32;
-                    origin = origin.map(|v| v / f64::from(1u32 << k.min(31)));
-                    effect_scale = effect_scale.map(|s| s.saturating_sub(k));
-                    key_scale = k as i32;
+                if let Some(total) = effect_scale {
+                    let base = scene.find(effect.model).map_or(total, |model| model.scale);
+                    let bias = total as i32 - base as i32;
+                    let reach = origin.iter().fold(0.0f64, |far, v| far.max(v.abs()));
+                    let msb = if reach >= 1.0 {
+                        reach.log2().floor() as i32
+                    } else {
+                        0
+                    };
+                    let shift = (msb - 0x1c).max(0);
+                    let e = bias - shift;
+                    let moved = shift + e.max(0);
+                    origin = origin.map(|v| v / 2.0f64.powi(moved));
+                    effect_scale = Some((base as i32 + e.min(0)).max(0) as u32);
+                    // `+0x130 = desc[+0x18] - e` for a negative `e`, else `desc[+0x18]` (0):
+                    // the depth key and every child model subtract it from their scale.
+                    key_scale = (-e).max(0);
                 }
             }
             if origin.iter().any(|value| value.abs() > STATION_DRAW_RANGE) {
@@ -3446,6 +3572,7 @@ impl Screen {
             // Model 0x6d's chains are detail tiers chosen by F1751 from the cloud's depth: a
             // far cloud draws only its first dots, a near one all of them.
             inputs.depth_detail = effect.model == ffe_core::dust::MODEL;
+            inputs.detail = self.shape_detail;
             inputs.globals[ffe_core::effects::EXPLOSION_MASS_GLOBAL] = effect.timer;
             // F942 writes `+0x9e = 0xffff` (global 1) on the explosion: model
             // 155 scales its fragments by it (`global1 >> 7`), so a zero word
@@ -3542,14 +3669,18 @@ impl Screen {
     fn draw_galaxy(&mut self, viewer: &ModelViewer, map: &MapScene) {
         self.frame[..320 * VIEW_HEIGHT]
             .copy_from_slice(&self.cabins[self.cabin_index][..320 * VIEW_HEIGHT]);
-        self.draw_shapes(viewer, &map.shapes);
         let shadowed = |screen: &mut Self, x: usize, y: usize, value: &str| {
             screen.text(x + 1, y + 1, value, 0);
             screen.text(x, y, value, 15);
         };
-        shadowed(self, 6, 147, &map.sector);
-        if let Some(fuel) = &map.fuel {
-            shadowed(self, 6, 137, fuel);
+        if let Some(page) = &map.page {
+            self.draw_map_page(page);
+        } else {
+            self.draw_shapes(viewer, &map.shapes);
+            shadowed(self, 6, 147, &map.sector);
+            if let Some(fuel) = &map.fuel {
+                shadowed(self, 6, 137, fuel);
+            }
         }
         // The console text: the date, then the description wrapped to 120 pixels.
         self.text(195, 164, &map.date, 17);
@@ -3573,6 +3704,174 @@ impl Screen {
             self.text(195, y, &line, 15);
             y += 8;
         }
+    }
+
+    /// The system map (F977): the orbit curves, the bodies' dots and names, the
+    /// time point at (10, 148) and the console's date, over the cabin art.
+    fn draw_system_map(&mut self, page: &SystemMapScene) {
+        let frame = &page.frame;
+        self.frame[..320 * VIEW_HEIGHT]
+            .copy_from_slice(&self.cabins[self.cabin_index][..320 * VIEW_HEIGHT]);
+        let height = crate::system_map::VIEW_HEIGHT;
+        let inside = |x: i32, y: i32| (0..320).contains(&x) && (0..height).contains(&y);
+        for orbit in &frame.orbits {
+            for pair in orbit.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                if (a.0 < -200 && b.0 < -200)
+                    || (a.0 > 520 && b.0 > 520)
+                    || (a.1 < -200 && b.1 < -200)
+                    || (a.1 > 360 && b.1 > 360)
+                {
+                    continue;
+                }
+                self.clipped_line(a, b, crate::system_map::GREEN, height);
+            }
+        }
+        for dot in &frame.dots {
+            let radius = dot.radius;
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx * dx + dy * dy <= radius * radius + radius / 2
+                        && inside(dot.x + dx, dot.y + dy)
+                    {
+                        self.pixel(dot.x + dx, dot.y + dy, dot.colour);
+                    }
+                }
+            }
+        }
+        // F978's marker on the picked body: a yellow box about its dot.
+        for dot in frame.dots.iter().filter(|dot| dot.marked) {
+            let r = dot.radius + 3;
+            let (x0, y0, x1, y1) = (dot.x - r, dot.y - r, dot.x + r, dot.y + r);
+            for (a, b) in [
+                ((x0, y0), (x1, y0)),
+                ((x1, y0), (x1, y1)),
+                ((x1, y1), (x0, y1)),
+                ((x0, y1), (x0, y0)),
+            ] {
+                self.clipped_line(a, b, crate::system_map::YELLOW, height);
+            }
+        }
+        for label in &frame.labels {
+            let colour = if label.marked {
+                crate::system_map::YELLOW
+            } else {
+                crate::system_map::WHITE
+            };
+            self.shadow_text(label.x, label.y, &label.text, colour);
+        }
+        for (row, line) in frame.details.iter().rev().enumerate() {
+            self.shadow_text(10, 138 - 10 * row as i32, line, crate::system_map::YELLOW);
+        }
+        self.text(10, 148, &frame.time_point, 15);
+        self.text(195, 164, &page.date, 17);
+    }
+
+    /// A line cut to the first `height` rows of the view.
+    fn clipped_line(&mut self, start: (i32, i32), end: (i32, i32), colour: u8, height: i32) {
+        // Liang-Barsky against the view's rectangle.
+        let (x0, y0) = (f64::from(start.0), f64::from(start.1));
+        let (dx, dy) = (f64::from(end.0 - start.0), f64::from(end.1 - start.1));
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        for (p, q) in [
+            (-dx, x0),
+            (dx, 319.0 - x0),
+            (-dy, y0),
+            (dy, f64::from(height - 1) - y0),
+        ] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return;
+                }
+            } else {
+                let r = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+            }
+        }
+        if t0 > t1 {
+            return;
+        }
+        let at = |t: f64| ((x0 + t * dx).round() as i32, (y0 + t * dy).round() as i32);
+        self.line(at(t0), at(t1), colour);
+    }
+
+    /// F842's page over the cabin: F851's body sprites (each `BlitIndex`ed at the
+    /// pen less its record's offsets, the bitmap's own offset added) and the texts.
+    fn draw_map_page(&mut self, page: &crate::map_pages::Page) {
+        let palette = self.palette;
+        if let Some(sky) = &page.background {
+            for (pixel, index) in self.frame.iter_mut().zip(sky) {
+                *pixel = palette[usize::from(*index)];
+            }
+        }
+        for placed in &page.sprites {
+            if let Some(Some(image)) = self.diagram.get(usize::from(placed.bitmap)) {
+                image.blit_rgb(&mut self.frame, &palette, placed.x, placed.y);
+            }
+        }
+        for text in &page.texts {
+            self.draw_page_text(text);
+        }
+    }
+
+    /// F1399/F1589 for a page string: the pen starts at (x, y); `0x0d` starts a
+    /// new 10-pixel line, `0xfd XX` moves the pen to `2 * XX`, `0xfe XX YY` to
+    /// (`2 * XX`, `YY`), `0x01 XX` (a colour) is skipped, and a word that would
+    /// pass the wrap width starts a new line (F1398).
+    fn draw_page_text(&mut self, text: &crate::map_pages::PageText) {
+        let (mut x, mut y) = (text.x, text.y);
+        let mut run = String::new();
+        let mut index = 0;
+        let bytes = &text.bytes;
+        let width = |screen: &Self, value: &str| screen.font.width(value).unwrap_or(0) as i32;
+        let flush = |screen: &mut Self, run: &mut String, x: &mut i32, y: &mut i32| {
+            for (n, word) in run.split_inclusive(' ').enumerate() {
+                let word_width = width(screen, word);
+                let trimmed = width(screen, word.trim_end());
+                // F1398 breaks as soon as the width left drops to zero.
+                if text.wrap > 0 && *x > text.x && *x - text.x + trimmed >= text.wrap {
+                    *x = text.x;
+                    *y += 10;
+                }
+                let _ = n;
+                screen.shadow_text(*x, *y, word, text.colour);
+                *x += word_width;
+            }
+            run.clear();
+        };
+        while index < bytes.len() {
+            let byte = bytes[index];
+            match byte {
+                0x0d => {
+                    flush(self, &mut run, &mut x, &mut y);
+                    x = text.x;
+                    y += 10;
+                    index += 1;
+                }
+                0xfd | 0x1e => {
+                    flush(self, &mut run, &mut x, &mut y);
+                    x = i32::from(bytes.get(index + 1).copied().unwrap_or(0)) * 2;
+                    index += 2;
+                }
+                0xfe | 0x1f => {
+                    flush(self, &mut run, &mut x, &mut y);
+                    x = i32::from(bytes.get(index + 1).copied().unwrap_or(0)) * 2;
+                    y = i32::from(bytes.get(index + 2).copied().unwrap_or(0));
+                    index += 3;
+                }
+                0x01 => index += 2,
+                byte if byte >= 0x20 => {
+                    run.push(char::from(byte));
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+        flush(self, &mut run, &mut x, &mut y);
     }
 
     /// The black frame `F1104`/`F915` leave after clearing the buffer.
@@ -3821,17 +4120,18 @@ pub fn flight_tics(state: &Flight) -> u32 {
         .wrapping_add((state.ticks as u32).wrapping_mul(ffe_core::model_animation::TICS_PER_FRAME))
 }
 
-/// Cockpit firing feedback is shown only through the firing mount's view.
-fn cockpit_beam_visible(view: ViewMode, mount: usize) -> bool {
+/// F1776 submits model 0x9c in cockpit, turret, external and combat views. The
+/// camera clips its geometry; do not suppress the whole shot by muzzle depth.
+fn beam_visible(view: ViewMode) -> bool {
     matches!(
         view,
-        ViewMode::Front | ViewMode::Rear | ViewMode::TopTurret | ViewMode::BottomTurret
-    ) && crate::combat::mount(view) == Some(mount)
-}
-
-/// The world-space muzzle model is safe to draw from the external camera.
-fn beam_visible(view: ViewMode) -> bool {
-    view == ViewMode::External
+        ViewMode::Front
+            | ViewMode::Rear
+            | ViewMode::TopTurret
+            | ViewMode::BottomTurret
+            | ViewMode::External
+            | ViewMode::Combat
+    )
 }
 
 /// Model units per flight unit: station 74's extent fills the old 40-unit
@@ -3859,6 +4159,29 @@ pub enum ViewButton {
 /// A model's bounding radius in flight units, at the shared model scale.
 pub fn model_radius(scene: &ModelViewer, model: u32) -> Option<f64> {
     Some(scene.find(model)?.radius()? / model_scale(scene)?)
+}
+
+/// F1680's set-up for a body in the camera's frame of reference: its distance class against the
+/// model's far and dot classes. The body is at `centre` (flight units, the camera's space); the
+/// object's own scale (`+0x7e`) is 0 for a system body.
+fn far_object(
+    camera: &Camera,
+    centre: [f64; 3],
+    descriptor: &ffe_core::model_animation::Descriptor,
+) -> ffe_core::model_animation::Draw {
+    use ffe_core::model_animation::{setup_object, Camera as ObjectCamera, ObjectState};
+    let unit = crate::original_flight::UNITS_PER_FLIGHT_UNIT;
+    let q31 = |v: f64| (v * 2_147_483_648.0).clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    let matrix: [i32; 9] = std::array::from_fn(|k| q31(camera.axes[k / 3][k % 3]));
+    let object = ObjectState {
+        position: centre.map(|v| (v * unit) as i64),
+        ..ObjectState::default()
+    };
+    let camera = ObjectCamera {
+        matrix,
+        position: camera.position.map(|v| (v * unit) as i64),
+    };
+    setup_object(&object, &camera, descriptor, [0; 3], &[[0; 3]; 8])
 }
 
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -3920,23 +4243,21 @@ mod cargo_page_tests {
 }
 
 #[cfg(test)]
-mod cockpit_beam_tests {
+mod beam_view_tests {
     use super::*;
 
     #[test]
-    fn firing_feedback_follows_the_cockpit_mount() {
-        let views = [
+    fn muzzle_model_is_submitted_in_source_laser_views() {
+        for view in [
             ViewMode::Front,
             ViewMode::Rear,
             ViewMode::TopTurret,
             ViewMode::BottomTurret,
-        ];
-        for (mount, view) in views.into_iter().enumerate() {
-            assert!(cockpit_beam_visible(view, mount));
-            assert!(!cockpit_beam_visible(view, (mount + 1) % 4));
+            ViewMode::External,
+            ViewMode::Combat,
+        ] {
+            assert!(beam_visible(view), "missing muzzle model in {view:?}");
         }
-        for view in [ViewMode::External, ViewMode::Missile, ViewMode::Combat] {
-            assert!(!cockpit_beam_visible(view, 0));
-        }
+        assert!(!beam_visible(ViewMode::Missile));
     }
 }

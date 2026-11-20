@@ -180,6 +180,7 @@ fn the_map_builds_a_runtime_upper_palette() {
         sector: map.sector_text(),
         fuel: None,
         date: date_text(5.0),
+        page: None,
         info: "Ross 154".into(),
     });
     let state = Flight {

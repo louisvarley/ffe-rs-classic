@@ -8,8 +8,8 @@ mod checks;
 mod config;
 mod draw;
 
-use checks::{Level, Report};
-use config::Launcher;
+use checks::{Kind, Level, Report};
+use config::{Launcher, Videos};
 use draw::{Icon, CREAM, CYAN, DIM, OLIVE, PANEL, VERIFIED};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
@@ -26,6 +26,12 @@ use std::sync::mpsc::{self, Receiver};
 const CANVAS: Vec2 = vec2(1536.0, 1024.0);
 const WARNING: Color32 = Color32::from_rgb(240, 190, 70);
 const FAILED: Color32 = Color32::from_rgb(255, 96, 80);
+/// Corner radii of the sidebar panel and of its items.
+const SIDEBAR_RADIUS: f32 = 18.0;
+const ITEM_RADIUS: f32 = 12.0;
+
+/// The project's home on GitHub.
+const GITHUB_URL: &str = "https://github.com/louisvarley/ffe-rs-classic";
 
 /// The game's console output from the last launch.
 const GAME_LOG: &str = "last-run.log";
@@ -99,6 +105,8 @@ struct App {
     root: PathBuf,
     saves: PathBuf,
     launcher: Launcher,
+    /// Where the game videos are, and how many (AVI files).
+    videos: Videos,
     config: Config,
     page: Page,
     tab: Tab,
@@ -119,11 +127,13 @@ impl App {
         let saves = root.join("saves");
         let launcher = Launcher::load(&saves, &root);
         let config = settings::load_config(&saves).unwrap_or_default();
+        let videos = config::resolve_videos(&launcher.game, launcher.videos.as_deref());
         let mut app = Self {
             game_text: launcher.game.display().to_string(),
             root,
             saves,
             launcher,
+            videos,
             config,
             page: Page::Play,
             tab: Tab::Display,
@@ -147,9 +157,10 @@ impl App {
         }
         let (send, receive) = mpsc::channel();
         let game = self.launcher.game.clone();
+        let music_bin = self.root.join("music.bin");
         std::thread::spawn(move || {
             let report = match job {
-                Job::Game => checks::verify_game(&game),
+                Job::Game => checks::verify_game_and_prepare_music(&game, &music_bin),
             };
             let _ = send.send(report);
         });
@@ -214,9 +225,38 @@ impl App {
         self.jobs.clear(); // Discard results for the previously selected folder.
         self.launcher.game = next;
         self.game_text = self.launcher.game.display().to_string();
+        self.refresh_videos();
         self.save_launcher();
         self.game_report = None;
         self.start(Job::Game);
+    }
+
+    /// Look for the videos again: the player's folder, else the game's `DATA`.
+    fn refresh_videos(&mut self) {
+        self.videos = config::resolve_videos(&self.launcher.game, self.launcher.videos.as_deref());
+    }
+
+    /// Use `picked` (or the `DATA` folder inside it) for the videos, or say why not.
+    fn choose_videos(&mut self, picked: PathBuf) {
+        let folder = ffe_rs::fmv::video_folder(&picked);
+        if ffe_rs::fmv::count_avi(&folder) == 0 {
+            self.notice = Some((
+                Level::Warning,
+                format!("No AVI files in {}.", folder.display()),
+            ));
+            return;
+        }
+        self.launcher.videos = Some(folder);
+        self.refresh_videos();
+        self.save_launcher();
+        self.notice = None;
+    }
+
+    /// Go back to the game folder's own `DATA` folder for the videos.
+    fn auto_videos(&mut self) {
+        self.launcher.videos = None;
+        self.refresh_videos();
+        self.save_launcher();
     }
 
     fn save_launcher(&mut self) {
@@ -250,6 +290,9 @@ impl App {
         command.arg("--root").arg(&self.root);
         command.arg("--game").arg(&self.launcher.game);
         command.arg("--start").arg(self.launcher.start.to_string());
+        if let Some(videos) = self.videos.folder.as_ref().filter(|_| self.videos.found()) {
+            command.arg("--videos").arg(videos);
+        }
         if self.launcher.skip_intro {
             command.arg("--skip-intro");
         }
@@ -322,8 +365,8 @@ impl eframe::App for App {
                 self.sidebar(ui, &rect);
                 match self.page {
                     Page::Play => self.play(ui, &rect),
-                    Page::Settings => self.settings(ui, rect(309.0, 372.0, 1515.0, 888.0)),
-                    Page::About => self.about(ui, rect(309.0, 372.0, 1515.0, 888.0)),
+                    Page::Settings => self.settings(ui, rect(309.0, 372.0, 1515.0, 932.0)),
+                    Page::About => self.about(ui, rect(309.0, 372.0, 1515.0, 932.0)),
                 }
                 self.footer(ui, &at);
             });
@@ -335,90 +378,92 @@ impl eframe::App for App {
 impl App {
     fn sidebar(&mut self, ui: &mut egui::Ui, rect: &dyn Fn(f32, f32, f32, f32) -> Rect) {
         let painter = ui.painter().clone();
-        // The sidebar's own translucent olive panel.
-        draw::vertical_gradient(
+        // The sidebar's own translucent olive panel, with rounded corners.
+        let frame = rect(22.0, 372.0, 287.0, 945.0);
+        draw::chamfer_gradient(
             &painter,
-            rect(22.0, 372.0, 287.0, 945.0),
+            frame,
+            SIDEBAR_RADIUS,
             &[
                 (0.0, Color32::from_rgba_unmultiplied(26, 34, 8, 210)),
                 (0.6, Color32::from_rgba_unmultiplied(10, 16, 8, 200)),
                 (1.0, Color32::from_rgba_unmultiplied(30, 40, 8, 120)),
             ],
         );
-        let frame = rect(22.0, 372.0, 287.0, 945.0);
-        painter.line_segment(
-            [frame.left_top(), frame.left_bottom()],
-            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(220, 225, 200, 70)),
+        painter.rect_stroke(
+            frame,
+            SIDEBAR_RADIUS,
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(220, 225, 200, 90)),
+            egui::StrokeKind::Inside,
         );
+        let entries = [
+            (Some(Page::Play), "Play", Icon::Play, 388.0),
+            (Some(Page::Settings), "Settings", Icon::Settings, 448.0),
+            (Some(Page::About), "About", Icon::Info, 508.0),
+            // A link, not a page: pinned to the bottom of the panel.
+            (None, "GitHub", Icon::Code, 877.0),
+        ];
+        // A thin divider above the link.
         painter.line_segment(
-            [frame.right_top(), frame.right_bottom()],
-            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(220, 225, 200, 70)),
+            [
+                rect(46.0, 862.0, 0.0, 0.0).min,
+                rect(263.0, 862.0, 0.0, 0.0).min,
+            ],
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(220, 225, 200, 60)),
         );
-        for (index, (page, label, icon)) in [
-            (Page::Play, "Play", Icon::Play),
-            (Page::Settings, "Settings", Icon::Settings),
-            (Page::About, "About", Icon::Info),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let top = 374.0 + 62.0 * index as f32;
-            let item = rect(24.0, top, 285.0, top + 60.0);
+        for (index, (page, label, icon, top)) in entries.into_iter().enumerate() {
+            let item = rect(34.0, top, 275.0, top + 54.0);
             let response = ui.interact(item, ui.id().with(("nav", index)), Sense::click());
-            let selected = self.page == page;
+            let selected = page.is_some_and(|page| self.page == page);
             if selected {
-                draw::vertical_gradient(
+                draw::chamfer_gradient(
                     &painter,
                     item,
+                    ITEM_RADIUS,
                     &[
                         (0.0, Color32::from_rgb(150, 164, 20)),
                         (0.5, Color32::from_rgb(98, 112, 6)),
                         (1.0, Color32::from_rgb(44, 54, 2)),
                     ],
                 );
-                painter.line_segment(
-                    [item.left_top(), item.right_top()],
+                painter.rect_stroke(
+                    item,
+                    ITEM_RADIUS,
                     Stroke::new(1.5_f32, CREAM),
+                    egui::StrokeKind::Inside,
                 );
-                painter.line_segment(
-                    [item.left_bottom(), item.right_bottom()],
-                    Stroke::new(1.5_f32, CREAM),
-                );
-            } else {
-                if response.hovered() {
-                    painter.rect_filled(
-                        item,
-                        CornerRadius::same(8),
-                        Color32::from_rgba_unmultiplied(120, 130, 30, 40),
-                    );
-                }
-                painter.line_segment(
-                    [
-                        pos2(item.left() + 16.0, item.bottom()),
-                        pos2(item.right() - 6.0, item.bottom()),
-                    ],
-                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(220, 225, 200, 60)),
+            } else if response.hovered() {
+                painter.rect_filled(
+                    item,
+                    ITEM_RADIUS,
+                    Color32::from_rgba_unmultiplied(120, 130, 30, 55),
                 );
             }
-            let centre = pos2(item.left() + 44.0, item.center().y);
+            let centre = pos2(item.left() + 36.0, item.center().y);
             draw::icon(
                 &painter,
                 icon,
-                Rect::from_center_size(centre, Vec2::splat(36.0)),
+                Rect::from_center_size(centre, Vec2::splat(34.0)),
                 CREAM,
             );
             painter.text(
-                pos2(item.left() + 86.0, item.center().y),
+                pos2(item.left() + 76.0, item.center().y),
                 Align2::LEFT_CENTER,
                 label,
                 draw::font(26.0, draw::BOLD),
                 CREAM,
             );
-            if response
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                self.page = page;
+            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let response = if page.is_none() {
+                response.on_hover_text(GITHUB_URL)
+            } else {
+                response
+            };
+            if response.clicked() {
+                match page {
+                    Some(page) => self.page = page,
+                    None => open_url(GITHUB_URL),
+                }
             }
         }
     }
@@ -547,6 +592,17 @@ impl App {
         );
         option_row(
             ui,
+            "Full screen",
+            "Start in a borderless full-screen window. Alt+Enter switches while playing.",
+            |ui| {
+                toggle(ui, &mut self.config.fullscreen);
+            },
+        );
+        section(ui, "Video filter");
+        filter_list(ui, &mut display.filter);
+        section(ui, "Scaling");
+        option_row(
+            ui,
             "Fit",
             "Whole-pixel scaling with borders, or fill the window.",
             |ui| {
@@ -556,21 +612,6 @@ impl App {
                     &[
                         (FitMode::PixelPerfect, prefs::FIT_LABELS[0]),
                         (FitMode::FillWindow, prefs::FIT_LABELS[1]),
-                    ],
-                );
-            },
-        );
-        option_row(
-            ui,
-            "Filter",
-            "Smoothing when the scale is not a whole number.",
-            |ui| {
-                choice(
-                    ui,
-                    &mut display.filter,
-                    &[
-                        (Filter::Nearest, prefs::FILTER_LABELS[0]),
-                        (Filter::Linear, prefs::FILTER_LABELS[1]),
                     ],
                 );
             },
@@ -590,15 +631,46 @@ impl App {
                 );
             },
         );
+        section(ui, "CRT effect");
+        option_row(
+            ui,
+            "Scanlines",
+            "Dark lines between the picture's rows, like the original's monitor.",
+            |ui| {
+                toggle(ui, &mut display.scanlines);
+            },
+        );
+        if display.scanlines {
+            option_row(ui, "Scanline strength", "How dark the lines are.", |ui| {
+                let mut percent = (display.scanline_intensity * 100.0).round() as u32;
+                choice(
+                    ui,
+                    &mut percent,
+                    &[
+                        (20, "20%"),
+                        (30, "30%"),
+                        (50, "50%"),
+                        (70, "70%"),
+                        (90, "90%"),
+                    ],
+                );
+                display.scanline_intensity = percent as f32 / 100.0;
+            });
+        }
     }
 
     fn game_tab(&mut self, ui: &mut egui::Ui) {
+        self.videos_section(ui);
         let config = &mut self.config;
         section(ui, "Controls");
         option_row(
             ui,
             "Control keys",
-            "Classic is the original's keys; Modern uses the arrows and WASD.",
+            if config.modern {
+                MODERN_CONTROLS
+            } else {
+                CLASSIC_CONTROLS
+            },
             |ui| {
                 choice(
                     ui,
@@ -611,6 +683,118 @@ impl App {
         toggle_grid(ui, "others", &mut config.others, &prefs::OTHER_LABELS);
         section(ui, "Galaxy map");
         toggle_grid(ui, "maps", &mut config.maps, &prefs::MAP_LABELS);
+    }
+
+    /// Where the videos are, with a way to pick another folder and to go back
+    /// to the game folder's own `DATA` folder.
+    fn videos_section(&mut self, ui: &mut egui::Ui) {
+        section(ui, "Game videos");
+        let about = match (&self.videos.folder, self.videos.found()) {
+            (Some(folder), true) => {
+                format!("{} AVI files in {}", self.videos.count, folder.display())
+            }
+            (Some(folder), false) => format!("No AVI files in {}", folder.display()),
+            (None, _) => "None found: the game folder has no DATA folder. Browse to the CD-ROM's DATA folder."
+                .to_owned(),
+        };
+        let custom = self.videos.custom;
+        let start = self
+            .videos
+            .folder
+            .clone()
+            .unwrap_or_else(|| self.launcher.game.clone());
+        let mut picked = None;
+        let mut reset = false;
+        option_row(ui, "Video folder", &about, |ui| {
+            if ui.button("Browse...").clicked() {
+                picked = pick_folder("Choose the folder with the game's AVI videos", &start);
+            }
+            if custom && ui.button("Use the game's DATA folder").clicked() {
+                reset = true;
+            }
+        });
+        if let Some(path) = picked {
+            self.choose_videos(path);
+        }
+        if reset {
+            self.auto_videos();
+        }
+    }
+}
+
+/// What the control keys are, as the Settings row says it for each preset.
+const CLASSIC_CONTROLS: &str = "The original's keys. Hold the right mouse button and drag to steer; \
+Enter and right Shift raise and lower the speed; A and Z pitch, comma and full stop yaw, [ and ] roll.";
+const MODERN_CONTROLS: &str = "W and S raise and lower the speed, the arrow keys pitch and yaw, \
+Q and E roll. The mouse does not steer.";
+
+/// Every video filter the game offers, with what each does.
+const FILTERS: [(Filter, &str, &str); 4] = [
+    (
+        Filter::Nearest,
+        "Nearest",
+        "Sharp square pixels: the original look.",
+    ),
+    (
+        Filter::Linear,
+        "Linear",
+        "Smooth scaling; differs from Nearest only when the size is not a whole number.",
+    ),
+    (
+        Filter::XbrzX2,
+        "xBRZ 2x",
+        "Edge-smoothing pixel-art upscaler, doubled before fitting the window.",
+    ),
+    (
+        Filter::Scale2x,
+        "Scale2x",
+        "A fast edge-directed doubling that keeps edges sharper than xBRZ.",
+    ),
+];
+
+/// All the filters at once, one per row, the chosen one marked.
+fn filter_list(ui: &mut egui::Ui, current: &mut Filter) {
+    for (filter, name, about) in FILTERS {
+        let selected = *current == filter;
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+        let painter = ui.painter();
+        if selected || response.hovered() {
+            painter.rect_filled(
+                rect,
+                CornerRadius::same(8),
+                if selected {
+                    Color32::from_rgba_unmultiplied(113, 128, 0, 70)
+                } else {
+                    Color32::from_rgba_unmultiplied(120, 130, 30, 35)
+                },
+            );
+        }
+        let dot = pos2(rect.left() + 22.0, rect.center().y);
+        painter.circle_stroke(dot, 9.0, Stroke::new(1.5_f32, CREAM));
+        if selected {
+            painter.circle_filled(dot, 5.0, VERIFIED);
+        }
+        painter.text(
+            pos2(rect.left() + 46.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            name,
+            draw::font(19.0, draw::BOLD),
+            CREAM,
+        );
+        painter.text(
+            pos2(rect.left() + 176.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            about,
+            draw::font(17.0, draw::ITALIC),
+            DIM,
+        );
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            *current = filter;
+        }
     }
 }
 
@@ -645,6 +829,13 @@ impl App {
                     let log = self.saves.join(GAME_LOG);
                     if ui.add_enabled(log.is_file(), egui::Button::new("Open last game log")).clicked() {
                         open_folder(&log);
+                    }
+                });
+                section(ui, "Source code");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(GITHUB_URL).color(CREAM));
+                    if ui.button("Open on GitHub").clicked() {
+                        open_url(GITHUB_URL);
                     }
                 });
                 section(ui, "Notes");
@@ -825,6 +1016,11 @@ fn open_folder(folder: &Path) {
     let _ = Command::new(program).arg(folder).spawn();
 }
 
+/// Open a web address in the default browser (the same helpers open folders).
+fn open_url(url: &str) {
+    open_folder(Path::new(url));
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 fn pick_folder(title: &str, start: &Path) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new().set_title(title);
@@ -931,66 +1127,98 @@ impl App {
         }
     }
 
+    fn video_status(&self) -> Status {
+        if self.videos.found() {
+            Status {
+                icon: Icon::Verified,
+                text: "Verified".to_owned(),
+                colour: VERIFIED,
+                busy: false,
+            }
+        } else {
+            Status {
+                icon: Icon::Circle,
+                text: "Not found".to_owned(),
+                colour: DIM,
+                busy: false,
+            }
+        }
+    }
+
     fn play(&mut self, ui: &mut egui::Ui, rect: &dyn Fn(f32, f32, f32, f32) -> Rect) {
         let status = self.game_status();
         let running = self.child.is_some();
+        // The icon and the line under the title say which release was found.
+        let release = self
+            .game_report
+            .as_ref()
+            .and_then(|report| report.release.clone());
+        let (game_icon, game_subtitle) = match &release {
+            Some(release) => (
+                match release.kind {
+                    Kind::CdRom => Icon::Disc,
+                    Kind::Floppy => Icon::Floppy,
+                    Kind::Shareware => Icon::Shareware,
+                },
+                release.text.clone(),
+            ),
+            None => (Icon::Disc, "Original game files (required)".to_owned()),
+        };
         ui.add_enabled_ui(!running, |ui| {
             let action = self.file_row(
                 ui,
-                rect(309.0, 495.0, 1515.0, 584.0),
-                Icon::Disc,
-                ("Frontier: First Encounters (Elite 3)", ""),
-                "Original game files (required)",
-                &status,
-                &self.launcher.game.clone(),
-                "game",
+                rect(309.0, 495.0, 1515.0, 567.0),
+                &RowSpec {
+                    icon: game_icon,
+                    title: "Frontier: First Encounters (Elite 3)",
+                    subtitle: &game_subtitle,
+                    status: &status,
+                    status_opens_details: true,
+                    folder: &self.launcher.game.clone(),
+                    id: "game",
+                    browse_title: "Choose the folder with FIRSTENC.EXE",
+                },
             );
             match action {
                 RowAction::Status => self.page = Page::About,
                 RowAction::Browse(path) => self.verify_game_folder(path),
                 RowAction::None => {}
             }
+            // The game's videos: the game folder's DATA folder when there is
+            // one, else the folder the player picks.
+            let video_status = self.video_status();
+            let video_subtitle = match (&self.videos.folder, self.videos.found()) {
+                (Some(folder), true) => format!(
+                    "{} AVI files found in {}",
+                    self.videos.count,
+                    folder.file_name().map_or_else(
+                        || folder.display().to_string(),
+                        |n| n.to_string_lossy().into_owned()
+                    )
+                ),
+                (Some(_), false) => "No AVI files in that folder".to_owned(),
+                (None, _) => "Optional: Browse to the CD-ROM's DATA folder".to_owned(),
+            };
+            let action = self.file_row(
+                ui,
+                rect(309.0, 576.0, 1515.0, 648.0),
+                &RowSpec {
+                    icon: Icon::Film,
+                    title: "Game videos (FMV)",
+                    subtitle: &video_subtitle,
+                    status: &video_status,
+                    status_opens_details: false,
+                    folder: &self.videos.folder.clone().unwrap_or_default(),
+                    id: "videos",
+                    browse_title:
+                        "Choose the folder with the game's AVI videos (the CD-ROM's DATA folder)",
+                },
+            );
+            if let RowAction::Browse(path) = action {
+                self.choose_videos(path);
+            }
         });
-        ui.scope_builder(
-            UiBuilder::new().max_rect(rect(325.0, 600.0, 1500.0, 645.0)),
-            |ui| {
-                if self.busy(Job::Game) {
-                    ui.label(RichText::new("Checking CD video files...").color(DIM));
-                } else {
-                    let video = self.game_report.as_ref().and_then(|r| {
-                        r.lines
-                            .iter()
-                            .find(|l| l.text.starts_with("CD videos present:"))
-                    });
-                    ui.horizontal(|ui| {
-                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
-                        draw::icon(
-                            ui.painter(),
-                            if video.is_some() {
-                                Icon::Verified
-                            } else {
-                                Icon::Circle
-                            },
-                            icon,
-                            if video.is_some() { VERIFIED } else { DIM },
-                        );
-                        ui.label(
-                            RichText::new(
-                                video.map_or("Original CD videos not found (optional)", |line| {
-                                    line.text.as_str()
-                                }),
-                            )
-                            .color(if video.is_some() {
-                                VERIFIED
-                            } else {
-                                DIM
-                            }),
-                        );
-                    });
-                }
-            },
-        );
-        let panel = rect(309.0, 637.0, 1515.0, 818.0);
+        let panel = rect(309.0, 658.0, 1515.0, 826.0);
         draw::rounded_panel(
             ui.painter(),
             panel,
@@ -999,7 +1227,7 @@ impl App {
             Stroke::new(1.5_f32, CREAM),
         );
         ui.scope_builder(
-            UiBuilder::new().max_rect(panel.shrink2(vec2(28.0, 16.0))),
+            UiBuilder::new().max_rect(panel.shrink2(vec2(28.0, 10.0))),
             |ui| {
                 ui.add_enabled_ui(!running, |ui| {
                     let before = self.launcher.clone();
@@ -1011,14 +1239,9 @@ impl App {
                         .iter()
                         .map(|(_, name, _)| (*name).to_owned())
                         .collect();
-                    option_row(
-                        ui,
-                        "Starting location",
-                        config::STARTS[start].2,
-                        |ui| {
-                            combo(ui, "start-location", &mut start, &labels);
-                        },
-                    );
+                    option_row(ui, "Starting location", config::STARTS[start].2, |ui| {
+                        combo(ui, "start-location", &mut start, &labels);
+                    });
                     self.launcher.start = config::STARTS[start].0;
                     option_row(ui, "Skip intro", "Go straight to the game.", |ui| {
                         toggle(ui, &mut self.launcher.skip_intro);
@@ -1057,18 +1280,10 @@ impl App {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn file_row(
-        &self,
-        ui: &mut egui::Ui,
-        row: Rect,
-        icon: Icon,
-        title: (&str, &str),
-        subtitle: &str,
-        status: &Status,
-        folder: &Path,
-        id: &str,
-    ) -> RowAction {
+    /// One of the Play page's rounded rows: icon, title and subtitle, a status
+    /// (click for details when `status_opens_details`), the open-folder button
+    /// and Browse.
+    fn file_row(&self, ui: &mut egui::Ui, row: Rect, spec: &RowSpec) -> RowAction {
         let painter = ui.painter().clone();
         draw::rounded_panel(
             &painter,
@@ -1080,39 +1295,42 @@ impl App {
         let mid = row.center().y;
         draw::icon(
             &painter,
-            icon,
-            Rect::from_center_size(pos2(row.left() + 69.0, mid), Vec2::splat(58.0)),
+            spec.icon,
+            Rect::from_center_size(pos2(row.left() + 69.0, mid), Vec2::splat(48.0)),
             CREAM,
         );
-        // Title (bold) with an optional regular suffix, then the italic subtitle.
-        let title_pos = pos2(row.left() + 132.0, mid - 15.0);
-        let galley =
-            painter.layout_no_wrap(title.0.to_owned(), draw::font(25.0, draw::BOLD), CREAM);
-        let width = galley.size().x;
-        painter.galley(title_pos - vec2(0.0, galley.size().y / 2.0), galley, CREAM);
-        if !title.1.is_empty() {
-            painter.text(
-                pos2(title_pos.x + width, title_pos.y),
-                Align2::LEFT_CENTER,
-                title.1,
-                draw::font(25.0, draw::REGULAR),
-                CREAM,
-            );
-        }
         painter.text(
-            pos2(row.left() + 132.0, mid + 15.0),
+            pos2(row.left() + 132.0, mid - 13.0),
             Align2::LEFT_CENTER,
-            subtitle,
+            spec.title,
+            draw::font(25.0, draw::BOLD),
+            CREAM,
+        );
+        painter.text(
+            pos2(row.left() + 132.0, mid + 14.0),
+            Align2::LEFT_CENTER,
+            spec.subtitle,
             draw::font(20.0, draw::ITALIC),
             CREAM,
         );
+        let id = spec.id;
+        let status = spec.status;
+        let folder = spec.folder;
         let mut action = RowAction::None;
-        // Status: icon and text; click for the details (or to build data).
+        // Status: icon and text.
         let status_rect = Rect::from_min_max(
             pos2(row.left() + 722.0, mid - 22.0),
             pos2(row.left() + 930.0, mid + 22.0),
         );
-        let response = ui.interact(status_rect, ui.id().with((id, "status")), Sense::click());
+        let response = ui.interact(
+            status_rect,
+            ui.id().with((id, "status")),
+            if spec.status_opens_details {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
         let icon_rect = Rect::from_center_size(pos2(row.left() + 743.0, mid), Vec2::splat(34.0));
         if status.busy {
             let t = ui.input(|i| i.time) as f32;
@@ -1128,7 +1346,8 @@ impl App {
             draw::font(21.0, draw::REGULAR),
             status.colour,
         );
-        if !status.busy
+        if spec.status_opens_details
+            && !status.busy
             && response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("Details")
@@ -1174,19 +1393,24 @@ impl App {
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
         {
-            if let Some(path) = pick_folder(
-                if id == "game" {
-                    "Choose the folder with FIRSTENC.EXE"
-                } else {
-                    "Choose the FFED3D folder"
-                },
-                folder,
-            ) {
+            if let Some(path) = pick_folder(spec.browse_title, folder) {
                 action = RowAction::Browse(path);
             }
         }
         action
     }
+}
+
+/// What a Play-page row shows.
+struct RowSpec<'a> {
+    icon: Icon,
+    title: &'a str,
+    subtitle: &'a str,
+    status: &'a Status,
+    status_opens_details: bool,
+    folder: &'a Path,
+    id: &'a str,
+    browse_title: &'a str,
 }
 
 enum RowAction {

@@ -1,14 +1,16 @@
-//! The Eagle's front-view laser no longer draws a fan. The executed original
-//! leaves the 3D view unchanged: `jjffe-smoke --game-frame <n> 0x02` with `FFE_TAKEOFF=1
-//! FFE_FIRE_AT=600` (the Eagle in flight, F931 on its front mount) differs from
-//! the unfired run only in the message line (rows 184..198), never in the view
-//! (rows 0..158). The port used to draw model 156 at its own scale 17 (512 times
-//! the firing ship's scale 8, which F1776 inherits through F1533's copy of the
-//! firing object) and showed a red fan; see `docs/KNOWN_ISSUES.md`.
+//! The Eagle's laser beam is the original's big wedge, not a stub. The executed
+//! JJFFE (`tools/reference`, a shot taken the way the player's key takes it, after
+//! F149 and before the draw: see `docs/KNOWN_ISSUES.md`) draws, in the Eagle's front
+//! view, a solid wedge from the crosshair to both lower corners of the view with a
+//! thin white ray down its middle. It is 13,206 red pixels for the 1MW pulse and the
+//! 1MW beam, the same shape in yellow for the 20MW beam, and a cyan wedge twice the
+//! size for the mining laser. The port used to draw model 156 at the ship's scale 8
+//! instead of its own scale 17 (512 times too small) and showed a short stub that
+//! pointed wherever the ship did.
 //!
-//! The port still draws a one-pixel ray (about 47 pixels from the lower right
-//! towards the target) that the original does not: a recorded difference, so
-//! the test only allows a thin ray, not a fan.
+//! The wedge here is within 1% of the original's pixel count; its edges are a few
+//! pixels off at the foot of the view (the original's right edge is wider), which is
+//! recorded in the issue note and not asserted.
 //!
 //! `FFE_WORLD_CACHE=<data.bin> cargo test -p ffe-rs --test eagle_beam -- --ignored`
 
@@ -19,14 +21,21 @@ use ffe_rs::model_viewer::ModelViewer;
 use ffe_rs::screen::Screen;
 
 const VIEW_ROWS: usize = 158;
-/// A one-pixel ray across the view (47 now); the old fan was thousands.
-const MAX_RAY_PIXELS: usize = 120;
+
+/// What the executed original draws for each laser, as (code, colour index of
+/// the wedge in the view, its pixel count).
+const WEDGES: [(u8, u32, usize); 3] = [
+    (0x88, 0xe40404, 13_206),
+    (0xb3, 0xe4e444, 13_206),
+    (0xc6, 0x04e4e4, 41_746),
+];
 
 #[test]
 #[ignore = "Local-only: needs the content cache (FFE_WORLD_CACHE)"]
-fn the_eagles_front_beam_is_at_most_a_thin_ray() {
-    let cache = ffe_content::read(&std::fs::read(std::env::var_os("FFE_WORLD_CACHE").unwrap()).unwrap())
-        .unwrap();
+fn the_eagles_front_beam_is_the_originals_wedge() {
+    let cache =
+        ffe_content::read(&std::fs::read(std::env::var_os("FFE_WORLD_CACHE").unwrap()).unwrap())
+            .unwrap();
     let viewer = ModelViewer::new(&cache).unwrap();
     let state = Flight {
         mode: Mode::Flight,
@@ -36,22 +45,40 @@ fn the_eagles_front_beam_is_at_most_a_thin_ray() {
     };
     let views = ViewState::default();
     let stats = viewer.ship_stats(state.ship);
-    for laser in [0x88u8, 0xa0] {
+    for (laser, colour, expected) in WEDGES {
         let mut screen = Screen::new(&cache).unwrap();
         screen.lasers = [laser, 0, 0, 0];
-        screen.draw(&state, views, Some(&viewer), true, "");
-        let before = screen.logical_pixels().to_vec();
         screen.beam = Some(combat::beam(&state, stats.as_ref(), views.mode, [0, 0]));
         screen.draw(&state, views, Some(&viewer), true, "");
-        let changed = before
+        let view = &screen.logical_pixels()[..VIEW_ROWS * 320];
+        let wedge = view
             .iter()
-            .zip(screen.logical_pixels())
-            .take(VIEW_ROWS * 320)
-            .filter(|(a, b)| a != b)
+            .filter(|pixel| **pixel & 0xffffff == colour)
             .count();
         assert!(
-            changed <= MAX_RAY_PIXELS,
-            "laser {laser:#x}: the Eagle's beam drew {changed} view pixels (a fan?)"
+            wedge.abs_diff(expected) * 100 <= expected * 3,
+            "laser {laser:#x}: {wedge} wedge pixels, the original draws {expected}"
         );
+        // The apex is the crosshair's centre and the foot spans the whole view
+        // (the mining laser's wedge is wider than the view and has no apex).
+        let row = |y: usize| -> Vec<usize> {
+            (0..320)
+                .filter(|x| view[y * 320 + x] & 0xffffff == colour)
+                .collect()
+        };
+        if laser != 0xc6 {
+            let apex = row(80);
+            assert!(
+                apex.first().is_some_and(|x| (155..=160).contains(x))
+                    && apex.last().is_some_and(|x| (158..=164).contains(x)),
+                "laser {laser:#x}: the wedge does not start at the crosshair: {apex:?}"
+            );
+            let foot = row(157);
+            assert_eq!(
+                (foot.first().copied(), foot.last().copied()),
+                (Some(0), Some(319)),
+                "laser {laser:#x}: the wedge does not reach both lower corners"
+            );
+        }
     }
 }

@@ -10,8 +10,9 @@ all 17 original HMP songs are cached (v29) and the scene calls play them.
 effect cues and scene music from the game events, and the ESC Sound Effects
 page drives `AudioSettings`/`SoundFlags`. The sample table, call sites, music
 rules, tests and the remaining mixer work are recorded in
-`docs/notes/sound-cues.md`. Effects are audible through WinMM `waveOut`; music is
-audible through the WinMM MIDI player.
+`docs/notes/sound-cues.md`. Windows uses `waveOut`; Linux uses CPAL. The
+launcher renders HMP songs with OxiSynth and GeneralUser GS into one packed
+`music.bin` on first run; the game loads PCM tracks from that bundle.
 
 Sources read for this note:
 
@@ -780,11 +781,10 @@ Remaining work, in order:
    `0x10`'s volume/pitch update, but the flight state does not yet drive
    `F1910`'s envelope or `F1908`'s randomised second wind voice. This is the
    next audible improvement.
-2. **Device support.** WinMM system MIDI and `waveOut` are in; test on a machine
-   without the GS Wavetable Synth (a MIDI port that only exposes external
-   hardware) and on a machine whose default wave device is exclusive-mode. Add a
-   device picker if needed. A bundled SoundFont/software synth is a separate
-   licensing decision (CLAUDE.MD §5).
+2. **Device support.** Windows uses rendered PCM when `waveOut` opens and keeps
+   system MIDI as a fallback. Linux uses CPAL's default output device and renders
+   the same cached PCM; verify both paths on actual Windows/Linux machines,
+   including device loss and exclusive-mode output. There is no device picker.
 3. **`.mid` override.** If a user has `MUSIC/*.mid`, JJFFE prefers it. Add a
    small SMF reader and route it through the same `MidiSink`.
 4. **Cache assets.** V29 caches all 17 `MUSIC/*.HMP` files byte-for-byte
@@ -792,9 +792,13 @@ Remaining work, in order:
    the cache to 1813 assets. A v28 cache still loads: song 0 comes from the cache
    and songs 1..16 fall back to the player's `MUSIC/` folder. Do not commit the
    HMPs; they are copyrighted game data.
-5. **Timbre.** The system synth is not the HMI patch set. Notes/timing/volume
-   are faithful; instrument sound is not. Record the synth/SoundFont identity in
-   any future cache provenance.
+5. **Timbre.** GeneralUser GS v2.0.3 is bundled with its license and attribution;
+   the launcher renders HMP events on first run and packs all tracks as mono
+   PCM in root `music.bin`. Its license permits use in software and notes uncertain
+   provenance for some samples. `FFE_SOUNDFONT` can select a local SF2 such as
+   Timbres Of Heaven when the user has the necessary rights. The original HMI
+   instrument bank is not available, so timbre remains an approximation. The
+   embedded GeneralUser GS SF2 is about 32 MB.
 6. **QQFRONT/QQSUSPEN duration.** Confirm whether the advertised header includes
    a repeat. There are no loop markers, so the port plays the event timeline and
    F919 restarts it on completion.
@@ -802,7 +806,12 @@ Remaining work, in order:
    the DOS game, and the port has no pan/distance path. Add it only if a caller
    needs it; the original effect calls are mono.
 
-No dashboard, burndown or `docs/PORT_LOG.md` edits were made.
+The Linux CPAL path is implemented, but this Windows checkout lacks the Linux
+ALSA development sysroot needed to compile that target locally. GeneralUser GS
+rendering and the packed bundle have been exercised against all 17 original
+local HMP tracks. The OxiSynth LGPL-2.1 distribution notice/relinking
+requirements still need to be reflected in the app's release notices before
+shipping binaries.
 
 ## Engine noise (F1910)
 

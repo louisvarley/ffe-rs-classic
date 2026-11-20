@@ -392,12 +392,14 @@ there), and launch straight into F733's countdown.
   nearby starport (F234/F235; `starport_in_range` uses F1680's exponential
   distance byte and the source's `0x13` threshold). The message is F236's exact
   `DATA_005040` text and the fine is a per-starport debt (ten times the printed
-  amount), not an immediate cash deduction. A recorded offence provokes every
-  police and military ship (`F238`'s response) and sets `alert`.
+  amount), not an immediate cash deduction. A recorded offence remembers the
+  witnessing starport; F238 then launches the police (`ffe_core::police`, see
+  `legal.md`).
 - `F783` clears `wanted`/`alert` when a police object (`+0x118 == 0xe`) is
   removed; `tick_ships` emits `ShipEvent::AlertCleared`. It does not clear the
   illegal-fire flag.
-- The port does **not** spawn extra police. A system with police (record
+- (Superseded 2026-11-19: the patrol and `provoke`'s call-in below are gone; F238's
+  response is `ffe_core::police`, see `docs/notes/legal.md`.) The port does **not** spawn extra police. A system with police (record
   byte `+7` non-zero) gets a fixed patrol force: one ship at the place
   nearest the player and one at each other place, up to `MAX_POLICE_PATROLS`
   (4), outside the `MAX_SHIPS` cap and never recycled for range. When the
@@ -551,6 +553,27 @@ there), and launch straight into F733's countdown.
   the old kinematics. Still open: the police response boost is not applied to
   physics ships, the target's velocity is not passed to F597, and the
   per-state frame trace against `--npc-trace` is not matched.
+  **2026-11-19:** a real trace now exists (below) and corrected the cadence:
+  F750 re-aims once per game second, not every frame. The executed
+  original's pirate leader (state 4, target the player, `+0xfe`) changes its
+  thrust words, speed caps and turn rates only on the AI step, 0xc22e tics
+  apart (frames 532, 579, 627, ... of a 1,043-tic frame run; the `+0x14d`
+  timer counts down on those frames), and F727 applies the stored words every
+  frame in between. `NpcShip::fly` now does the same (`think_tics`,
+  `THINK_TICS`), with F596's modifier 1 as F750 passes it. The trace comes from
+  `FFE_PLAYER_TO_PIRATE` in `tools/reference/headless.c` (the player is moved
+  beside the leader, the NPC untouched), replayed by
+  `crates/ffe-core/tests/npc_pirate_replay.rs`: the port's `guide` gives the
+  original's thrust words, and with that cadence `Motion` reproduces the
+  record's orientation, thrust, caps and rates exactly over 2,268 frames
+  (47 AI steps) and its position within a few mm. The original's pirates at
+  the default Hope start never approach on their own (nine ships, states
+  constant over 20,000 frames at 10000x): they only react once the player is in
+  their frame, 1e15 mm out. Residuals: the y velocity accumulator is one count
+  lower in the original every frame, the velocity differs by one unit on some
+  frames, F593's waypoint offset (`+0x102..+0x106` words shifted left 10, set
+  by F749 from the clock) is not modelled, and a new ship thinks at once where
+  the original waits for the next global step.
 
 - **The full per-state AI.** The port runs the flight cycle, the pirate states,
   the station cycle above and the jump states; the missile control rows
@@ -718,8 +741,8 @@ default start: six F691 bay ships parked at three ports (one model 44 on an
 Old Blackelk pad), an F699 aux trader (model 71, type 0xf), one F689 trader in
 transit and two pirate-group ships (type 0xfb), and **no police ship** (type
 0xe). F688 has no police draw, so the new game's pass (`System::start`) now
-spawns none; a later entry keeps the port's patrol until F238/F783's response
-is ported. The per-kind caps were lifted (see the traffic cap above).
+spawns none; a later entry kept the port's patrol until F238/F783's response
+was ported (removed 2026-11-19: no entry spawns a patrol, only the scripted capture does). The per-kind caps were lifted (see the traffic cap above).
 
 Still open: the draw ledger. With the port's RNG the new game rolls
 traders 0, bay 13, aux 0, pirates 0 over 12 places; the original rolled one
@@ -768,3 +791,13 @@ original does not have. Mission scripts' ship-against-ship orders (F41's
 `set_ai`) and the assassination contract's target and escorts are original
 paths and stay.
 
+
+## parity-15 close (2026-11-19)
+
+The pirate leader's approach (F750 through F596 with modifier 1, aimed once per game second) replays exactly; the police response
+(F238/F239/F240) replays frame for frame; F748 acts on the ship's own step; no entry spawns a patrol. Not matched, and accepted:
+F593's waypoint offset (F749's `+0x102..+0x106` words, sin and the shared pair, shifted by 10: about 1 km), the system-wide F702
+placement (the original's ships ride F1507's orbit at zero thrust until the player enters their frame, so there is nothing to
+trace while docked), attack states 1/2, the missile rows, and F659's launch positions. Traders, escorts and heavy freighters have no
+dynamics in the original without the player in their frame (`--npc-trace` and the 20,000-frame run), so there is no per-state trace
+to match them against.

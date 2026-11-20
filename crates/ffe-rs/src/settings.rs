@@ -37,6 +37,9 @@ const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 pub struct Config {
     pub modern: bool,
     pub display: DisplaySettings,
+    /// Start in the borderless full-screen window (the launcher's Display
+    /// setting). Alt+Enter and the in-game toggle stay session-only.
+    pub fullscreen: bool,
     pub space_colour: usize,
     pub shape_detail: usize,
     pub others: [bool; 10],
@@ -54,6 +57,7 @@ impl Default for Config {
         Self {
             modern: prefs.modern,
             display: prefs.display,
+            fullscreen: false,
             space_colour: prefs.space_colour,
             shape_detail: prefs.shape_detail,
             others: prefs.others,
@@ -90,6 +94,11 @@ impl Config {
         out.push_str(&format!("station_approach={}\n", self.station_approach));
         out.push_str(&format!("starport_approach={}\n", self.starport_approach));
         out.push_str(&self.display.to_config());
+        out.push_str(&format!(
+            "fullscreen={}
+",
+            on_off(self.fullscreen)
+        ));
         for (action, key) in &self.remap {
             out.push_str(&format!("bind.{action}={key}\n"));
         }
@@ -179,6 +188,7 @@ impl Config {
                     }
                     config.remap.insert(action.to_owned(), value.to_owned());
                 }
+                "fullscreen" => config.fullscreen = parse_on_off(value)?,
                 "scale" | "fit" | "filter" | "aspect" => {}
                 _ => {}
             }
@@ -414,6 +424,7 @@ mod tests {
         config.display.filter = crate::display::Filter::Scale2x;
         config.display.scanlines = true;
         config.display.scanline_intensity = 0.9;
+        config.fullscreen = true;
         config.others[1] = true;
         config.maps[4] = true;
         config.sound[7] = false;

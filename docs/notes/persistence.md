@@ -93,6 +93,7 @@ Files live in `<root>/saves/`:
 |---|---|
 | `quick.json` | F5's quick save; atomically replaced |
 | `commander-NNNNNNNN.json` | Ctrl+F5's new-only numbered save (8 digits, 00000001..) |
+| `<name>.json` | A save made from the Escape pages' **Save** row (2026-11-18): a name box offers the next `commander-NNNNNNNN`, the player may clear it and type another (1-24 letters, digits, spaces, `-`, `_`; not `quick` or a Windows device name), and `.json` follows the box and cannot be edited. Enter refuses a name that is invalid or already taken and shows why; nothing is ever overwritten. The Load and Delete lists show every `*.json` save (quick first, then newest first) |
 | `config.cfg` | version-2 preferences (`controls.cfg`/`display.cfg` are read once as migration) |
 
 JSON shape (one top-level object, `deny_unknown_fields` at every level):

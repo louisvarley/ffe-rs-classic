@@ -21,7 +21,7 @@ starport's fine ledger. See "The 4500 discrepancy" below.
 | Fine table | `DATA_005039` `ffedat.asm:4362-4382`: eleven 14-byte records `{u32 points, u32 fine, u32 witness, u8 flags, u8 pad}` |
 | Messages | `DATA_005040` / `DATA_005041` `ffedat.asm:4384/4386`; offence names `DATA_005042`-`DATA_005052` 4388-4408 |
 | Wanted bit | `F236` 18897-18905: `DATA_008646 |= 1` unless the offender's model is 0x45/0x4f |
-| Police chase (alert) | `F238` 18939-19037: `DATA_008647` 1/0xff and F239's police spawn/decay; `DATA_008647` is not set by the offence itself |
+| Police chase (alert) | `F238` 18939-19037 (day event, enabled by the wanted bit) and `F240` 19134 (frame event, enabled by `DATA_008647`): ported in `ffe_core::police`; `DATA_008647` is not set by the offence itself |
 | Clear when the chase ends | `F783` 51110-51123: an object with `+0x118 == 0xe` (police) is removed → `DATA_008647 = 0`, `DATA_008646 &= ~1` |
 | Docking fine check | `F655` 44642-44653: `DATA_009095[DATA_008996] >= 0x2710` → fine refusal; `F366` 27854-27893 pays it (the fines office) |
 | No HUD badge | the flight HUD never reads `DATA_008646/47`; F2's status screen has `LEGAL STATUS`/`Clean..Fugitive` (`DATA_005189`, `DATA_005201`-`005205`) but that screen is not ported |
@@ -68,8 +68,9 @@ offence is recorded, so the port also leaves `Flight::credits` alone.
   - `starport_witness`/`Navigator::starport_in_range` is F234/F235 in FFED3D's
     deterministic form: the nearest starport whose byte is `< 0x13`
     (`JURISDICTION_DISTANCE`), returned as the `DATA_008996` ordinal.
-  - `Navigator::player_fired` reports the offence, provokes every police and
-    military ship (F238's response) and sets `alert` (`DATA_008647`).
+  - `Navigator::player_fired` reports the offence and remembers the witnessing
+    starport (`DATA_008804+0x50dc`, `Navigator::offended`). The response is
+    `ffe_core::police` (F238/F239/F240, 2026-11-19), not a mass provocation.
   - `tick_ships` clears `wanted`/`alert` and emits `ShipEvent::AlertCleared`
     when a police ship is removed (F783).
   - `fine_at` is wired into the player's F655 docking requests, so a ledger of
@@ -148,9 +149,22 @@ The owner must decide whether to override the table to the remembered
 
 ## 5. Remaining / owner decisions
 
-- **Police spawns** (F238/F239) are not ported: the response provokes F688's
-  existing police and military traffic. Spawning extra police needs F927 slots
-  and the F239 object template.
+- **Police response (F238/F239/F240), ported 2026-11-19** in `ffe_core::police`
+  and checked frame for frame against the executed original (Hope, an open-air
+  starport: 7,798 of 7,798 frames, 11 launches; an orbital station: 4,798 of
+  4,798, 10 launches; `crates/ffe-core/tests/police_replay.rs`). F238 runs once a
+  game day (0xc22e tics) while the wanted bit is set; F240 steps the clock `+0xde`
+  every frame while the chase flag is not zero. An open-air starport (`+0x14c`
+  bit 0x40) starts the chase when its clock is 0, then rolls F1530 below 0x4000 a
+  day for one police ship (F922(4), state 1); any other station launches two in
+  state 0x22 when its record is idle, sets mode 0xff, and F748 sends them in
+  (state 1) once the door has opened. Each launch takes one of `+0xdc` (initially
+  `+0xce * 8 + 8`). Clearing the wanted bit stops F238 and sends the attacking
+  police to state 8. F748 acts on the ship's own AI step (143 frames after the
+  launch, three steps), the day phase is the game's global marker, the port has
+  no patrol of its own and a script's F236 records the offended starport
+  (2026-11-19, parity-15). Open: F659's exact launch positions and F233's
+  event 1 (clears the bit; a GUI key action, no gameplay path found).
 - **Fines office** (F366/F543/F552, the police contact) is not ported; the debt
   is visible in `Legal::fines` and the F655 refusal, but cannot be paid yet.
 - **F2 legal-status screen** (`LEGAL STATUS`, `Clean`/`Offender`/`Criminal`/

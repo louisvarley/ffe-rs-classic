@@ -253,7 +253,7 @@ F911's `mov` to the capacity is kept as an add (`docs/DEVIATIONS.md`).
 
 ## PAR-17 — P1 — Restore source RNG state and call order for gameplay
 
-**Status:** todo. **Evidence:** Confirmed gameplay deviation.
+**Status:** in progress. **Evidence:** Confirmed gameplay deviation.
 
 **Finding:** Markets, effects, dust and NPC adapters initialise independent streams from system/position/clock. The original shares DATA_008818/8820 calls. Identical formulas cannot reproduce stocks, encounters, damage or missions with a different draw order.
 

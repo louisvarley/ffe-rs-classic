@@ -14,6 +14,7 @@ build, play and test.
 | [PORT_LOG.md](PORT_LOG.md) | Every change with its evidence and trace hashes, newest first. |
 | [DEVIATIONS.md](DEVIATIONS.md) | The register of intentional differences from the source (SIM/EXP rows). |
 | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) | Known source and reference issues, and the bug policy. |
+| [ACCEPTED_PARITY.md](ACCEPTED_PARITY.md) | Parity items closed as about 95% close to the original, with the gaps left on purpose. |
 | [audits/](audits/gameplay-parity-2026-10-26.md) | The source-parity audit (PAR-nn items) and its JSON progress record. |
 
 ## Reference, formats and conventions
@@ -104,7 +105,14 @@ Each note maps the original routines to the Rust and records what is verified.
 [sound-cues](notes/sound-cues.md),
 [music](notes/music.md),
 [cd-media](notes/cd-media.md),
-[launcher](notes/launcher.md).
+[launcher](notes/launcher.md),
+display filters: [README](notes/display-filters-README.md),
+[summary](notes/display-filters-summary.md),
+[design](notes/display-filters-design.md),
+[comparison](notes/display-filters-comparison.md),
+[implementation guide](notes/display-filters-implementation-guide.md),
+[implementation record](notes/display-filters-implementation-summary.md),
+[testing](notes/display-filters-testing.md).
 
 ## Archive
 

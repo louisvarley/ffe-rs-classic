@@ -53,6 +53,19 @@ const STARPORT_APPROACH_LABELS: [&str; 5] = ["6 km (original)", "4 km", "3 km", 
 
 /// The original's "Level of Shape Detail" values (`DATA_004964`).
 pub const SHAPE_DETAIL: [&str; 4] = ["Low", "Medium", "High", "Very High"];
+
+/// F228 (`FUNC_000228_SysMenuUpdateGfxDetail`, `ffe.asm:18499`): the detail words F1751 adds
+/// to an object's scale (`DATA_008812`, `DATA_008813`), from the "Level of Shape Detail"
+/// radio. The first radio byte gives `-1, -2`, the second `0, 0`, the third `1, 1`, and none
+/// set (the fourth row) `1, 1`; the default game runs High and the executed original reads
+/// `1, 1`.
+pub fn shape_detail_words(index: usize) -> [i32; 2] {
+    match index {
+        0 => [-1, -2],
+        1 => [0, 0],
+        _ => [1, 1],
+    }
+}
 /// The original's "Space Colour" values (`DATA_004964`). The value is the
 /// blue of the player's 3-byte background colour `DATA_008815..817`, set as
 /// `(0, 0, index)` with four-bit components by `FUNC_001575`.
@@ -83,9 +96,9 @@ pub const MAP_LABELS: [&str; 5] = ["Stalks", "Grid", "Trade routes", "Names text
 
 /// The port-only Display Options page's rows. The original has no display page
 /// and no resolution choice; these are presentation extensions.
-pub const WINDOW_SCALE_LABELS: [&str; 6] = ["1x", "2x", "3x", "4x", "5x", "6x"];
+pub const WINDOW_SCALE_LABELS: [&str; 5] = ["1x", "2x", "3x", "4x", "5x"];
 pub const FIT_LABELS: [&str; 2] = ["Pixel-perfect", "Fill window"];
-pub const FILTER_LABELS: [&str; 5] = ["Nearest", "Linear", "xBRZ 2x", "xBRZ 3x", "Scale2x"];
+pub const FILTER_LABELS: [&str; 4] = ["Nearest", "Linear", "xBRZ 2x", "Scale2x"];
 pub const ASPECT_LABELS: [&str; 2] = ["4:3 (DOS)", "Square"];
 
 /// The original's "Sound Effects" rows (`DATA_004965`).
@@ -174,13 +187,14 @@ pub enum Action {
     Scanlines,
     /// Scanline intensity adjustment.
     ScanlineIntensity,
+    Save,
+    Load,
+    Delete,
+    NewGame,
     /// "Return to Game": close the pages.
     Close,
     /// The port's Quit (the original's "Quit to DOS").
     Quit,
-    /// A row the original has but this port does not implement (it stays
-    /// grey and inert), e.g. Load/Save/Delete/New Game.
-    Ignored,
 }
 
 /// How the icon before a row is drawn: the original's 0x2c ("on") and 0x2d
@@ -235,6 +249,10 @@ pub enum Activate {
     None,
     Close,
     Quit,
+    Save,
+    Load,
+    Delete,
+    NewGame,
 }
 
 /// Which settings the port applies. The original's `FUNC_000216` toggles the
@@ -272,8 +290,9 @@ pub struct Prefs {
     pub starport_approach: usize,
     /// Port-only presentation choices; persisted in `saves/display.cfg`.
     pub display: DisplaySettings,
-    /// Borderless full-screen. Session-only: a saved full-screen launch would
-    /// surprise the next start, and `Alt+Enter` restores a window at once.
+    /// Borderless full-screen. The in-game toggle is session-only (`Alt+Enter`
+    /// restores a window at once); the launcher's Display setting is what
+    /// starts the game full screen (`settings::Config::fullscreen`).
     pub fullscreen: bool,
 }
 
@@ -395,34 +414,18 @@ impl Prefs {
                     Action::Page(PORT),
                     Mark::Action,
                     true,
-                    18,
+                    15,
                 ));
                 rows.push(row(32, 78, "Quit", Action::Quit, Mark::Action, true, 16));
-                rows.push(row(
-                    112,
-                    28,
-                    "Load",
-                    Action::Ignored,
-                    Mark::Action,
-                    false,
-                    15,
-                ));
-                rows.push(row(
-                    112,
-                    38,
-                    "Save",
-                    Action::Ignored,
-                    Mark::Action,
-                    false,
-                    15,
-                ));
+                rows.push(row(112, 28, "Load", Action::Load, Mark::Action, true, 15));
+                rows.push(row(112, 38, "Save", Action::Save, Mark::Action, true, 15));
                 rows.push(row(
                     112,
                     48,
                     "Delete",
-                    Action::Ignored,
+                    Action::Delete,
                     Mark::Action,
-                    false,
+                    true,
                     15,
                 ));
                 rows.push(row(
@@ -438,9 +441,9 @@ impl Prefs {
                     112,
                     78,
                     "New Game",
-                    Action::Ignored,
+                    Action::NewGame,
                     Mark::Action,
-                    false,
+                    true,
                     16,
                 ));
             }
@@ -543,7 +546,7 @@ impl Prefs {
                     Action::Page(DISPLAY),
                     Mark::Action,
                     true,
-                    18,
+                    15,
                 ));
 
                 rows.push(main_menu(32, 136));
@@ -578,7 +581,7 @@ impl Prefs {
                     Action::Page(PORT),
                     Mark::Action,
                     true,
-                    18,
+                    15,
                 ));
                 rows.push(main_menu(32, 136));
             }
@@ -616,8 +619,7 @@ impl Prefs {
                         0 => Filter::Nearest,
                         1 => Filter::Linear,
                         2 => Filter::XbrzX2,
-                        3 => Filter::XbrzX3,
-                        4 => Filter::Scale2x,
+                        3 => Filter::Scale2x,
                         _ => Filter::Nearest,
                     };
                     rows.push(row(
@@ -632,7 +634,7 @@ impl Prefs {
                 }
                 rows.push(row(
                     32,
-                    96,
+                    86,
                     "Fullscreen",
                     Action::Fullscreen,
                     Mark::Toggle(self.fullscreen),
@@ -647,7 +649,7 @@ impl Prefs {
                     };
                     rows.push(row(
                         176,
-                        126 + 10 * index as i32,
+                        116 + 10 * index as i32,
                         label,
                         Action::DisplayAspect(aspect),
                         Mark::Radio(self.display.aspect == aspect),
@@ -657,7 +659,7 @@ impl Prefs {
                 }
                 rows.push(row(
                     32,
-                    106,
+                    96,
                     "Scanlines",
                     Action::Scanlines,
                     Mark::Toggle(self.display.scanlines),
@@ -668,7 +670,7 @@ impl Prefs {
                 if self.display.scanlines {
                     rows.push(row(
                         32,
-                        116,
+                        106,
                         "Intensity",
                         Action::ScanlineIntensity,
                         Mark::Action,
@@ -700,12 +702,6 @@ impl Prefs {
                     y: 18,
                     text: "Preference pages available:",
                     colour: 16,
-                });
-                texts.push(Text {
-                    x: 32,
-                    y: 146,
-                    text: "Yellow: port additions. Grey: not implemented.",
-                    colour: 18,
                 });
             }
             GRAPHIC => {
@@ -783,7 +779,7 @@ impl Prefs {
                     x: 32,
                     y: 18,
                     text: "Advanced options:",
-                    colour: 18,
+                    colour: 16,
                 });
                 texts.push(Text {
                     x: 32,
@@ -829,7 +825,7 @@ impl Prefs {
                     x: 32,
                     y: 18,
                     text: "Display options:",
-                    colour: 18,
+                    colour: 15,
                 });
                 texts.push(Text {
                     x: 32,
@@ -851,7 +847,7 @@ impl Prefs {
                 });
                 texts.push(Text {
                     x: 176,
-                    y: 116,
+                    y: 106,
                     text: "Pixels:",
                     colour: 16,
                 });
@@ -877,12 +873,6 @@ impl Prefs {
                     y: 148,
                     text: "Alt+Enter: fullscreen. Choices apply at once.",
                     colour: 15,
-                });
-                texts.push(Text {
-                    x: 32,
-                    y: 126,
-                    text: "Port extension.",
-                    colour: 18,
                 });
             }
             _ => {}
@@ -952,13 +942,14 @@ impl Prefs {
             }
             Action::ScanlineIntensity => {
                 // Cycle through intensities: 0.2, 0.3, 0.5, 0.7, 0.9
-                self.display.scanline_intensity = match (self.display.scanline_intensity * 10.0) as i32 {
-                    2 => 0.3,
-                    3 => 0.5,
-                    5 => 0.7,
-                    7 => 0.9,
-                    _ => 0.2,
-                };
+                self.display.scanline_intensity =
+                    match (self.display.scanline_intensity * 10.0) as i32 {
+                        2 => 0.3,
+                        3 => 0.5,
+                        5 => 0.7,
+                        7 => 0.9,
+                        _ => 0.2,
+                    };
                 Activate::None
             }
             Action::Close => {
@@ -966,6 +957,10 @@ impl Prefs {
                 Activate::Close
             }
             Action::Quit => Activate::Quit,
+            Action::Save => Activate::Save,
+            Action::Load => Activate::Load,
+            Action::Delete => Activate::Delete,
+            Action::NewGame => Activate::NewGame,
             Action::Page(_)
             | Action::ShapeDetail(_)
             | Action::SpaceColour(_)
@@ -974,8 +969,7 @@ impl Prefs {
             | Action::Sound(_)
             | Action::StationApproach(_)
             | Action::StarportApproach(_)
-            | Action::WindowScale(_)
-            | Action::Ignored => Activate::None,
+            | Action::WindowScale(_) => Activate::None,
         }
     }
 
@@ -1102,6 +1096,21 @@ mod tests {
         assert_eq!(prefs.sound, [true; 10]);
     }
 
+    /// F228's detail words, as the executed JJFFE 2.8a7 reads them (`DATA_008812/8813`
+    /// were `1, 1` with the default High radio set, 2026-11-18).
+    #[test]
+    fn the_shape_detail_radio_gives_f228s_detail_words() {
+        assert_eq!(shape_detail_words(0), [-1, -2]);
+        assert_eq!(shape_detail_words(1), [0, 0]);
+        assert_eq!(shape_detail_words(2), [1, 1]);
+        assert_eq!(shape_detail_words(3), [1, 1]);
+        assert_eq!(
+            shape_detail_words(Prefs::default().shape_detail),
+            [1, 1],
+            "the default game runs High"
+        );
+    }
+
     #[test]
     fn space_colours_are_the_captured_original_ramp() {
         // The captured default is palette entry 182, six-bit (3,3,19);
@@ -1155,7 +1164,29 @@ mod tests {
         prefs.escape();
         prefs.page = DISPLAY;
         assert_eq!(prefs.display, DisplaySettings::default());
-        // Scale rows at x 32, y 36..86; 3x is the third row.
+        let rows = prefs.rows();
+        assert!(!rows
+            .iter()
+            .any(|row| row.label == "6x" || row.label == "xBRZ 3x"));
+        assert_eq!(
+            rows.iter().find(|row| row.label == "Fullscreen").unwrap().y,
+            86
+        );
+        assert_eq!(
+            rows.iter().find(|row| row.label == "Scale2x").unwrap().y,
+            96
+        );
+        assert_eq!(
+            rows.iter().find(|row| row.label == "Square").unwrap().y,
+            126
+        );
+        let texts = prefs.texts();
+        assert_eq!(
+            texts.iter().find(|text| text.text == "Pixels:").unwrap().y,
+            106
+        );
+        assert!(!texts.iter().any(|text| text.text == "Port extension."));
+        // Scale rows at x 32, y 36..76; 3x is the third row.
         prefs.click(34, 56);
         assert_eq!(prefs.display.scale, 3);
         // Fit/filter/aspect rows at x 176.
@@ -1163,16 +1194,66 @@ mod tests {
         assert_eq!(prefs.display.fit, FitMode::FillWindow);
         prefs.click(178, 80);
         assert_eq!(prefs.display.filter, Filter::Linear);
-        prefs.click(178, 136);
+        prefs.click(178, 126);
         assert_eq!(prefs.display.aspect, PixelAspect::Square);
         // Fullscreen is a session-only toggle.
-        prefs.click(34, 96);
+        prefs.click(34, 86);
         assert!(prefs.fullscreen);
-        prefs.click(34, 96);
+        prefs.click(34, 86);
         assert!(!prefs.fullscreen);
+        prefs.page = MAIN;
+        assert_eq!(
+            prefs
+                .rows()
+                .iter()
+                .find(|row| row.label == "Advanced Options")
+                .unwrap()
+                .colour,
+            15
+        );
+        assert!(!prefs
+            .texts()
+            .iter()
+            .any(|text| text.text.contains("Yellow:")));
+        prefs.page = PORT;
+        let port_rows = prefs.rows();
+        assert_eq!(
+            port_rows
+                .iter()
+                .find(|row| row.label == "Display Options")
+                .unwrap()
+                .colour,
+            15
+        );
+        assert_eq!(
+            prefs
+                .texts()
+                .iter()
+                .find(|text| text.text == "Advanced options:")
+                .unwrap()
+                .colour,
+            16
+        );
+        let pages = [MAIN, GRAPHIC, SOUND, OTHERS, MAPS, PORT, DOCKING, DISPLAY];
+        for page in pages {
+            prefs.page = page;
+            assert!(
+                prefs.rows().iter().all(|row| row.colour != 18),
+                "page {page} has a yellow menu item"
+            );
+        }
+        prefs.page = DISPLAY;
+        assert_eq!(
+            prefs
+                .texts()
+                .iter()
+                .find(|text| text.text == "Display options:")
+                .unwrap()
+                .colour,
+            15
+        );
         // The main page keeps its original rows; the Port Options page opens
         // the display page from the port-only row at y 104.
-        prefs.page = PORT;
         assert_eq!(prefs.click(34, 104), Activate::None);
         assert_eq!(prefs.page, DISPLAY);
         // The Main Menu row returns.

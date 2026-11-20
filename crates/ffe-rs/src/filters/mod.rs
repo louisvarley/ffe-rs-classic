@@ -4,9 +4,9 @@
 // final window scaling. See docs/notes/display-filters-design.md.
 
 pub mod scale2x;
-pub mod xbrz;
 pub mod scanlines;
+pub mod xbrz;
 
 pub use scale2x::scale2x;
-pub use xbrz::{xbrz_2x, xbrz_3x};
 pub use scanlines::apply_scanlines;
+pub use xbrz::xbrz_2x;

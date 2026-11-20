@@ -63,7 +63,9 @@ pub struct Damage {
     pub service_timer: u32,
 }
 
-fn source_service_timer() -> u32 { u32::MAX }
+fn source_service_timer() -> u32 {
+    u32::MAX
+}
 
 fn default_service_counters() -> [u32; 2] {
     [SERVICE_DAYS; 2]

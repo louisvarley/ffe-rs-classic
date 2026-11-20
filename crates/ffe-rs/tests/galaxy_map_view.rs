@@ -39,6 +39,7 @@ fn the_map_draws() {
         sector: map.sector_text(),
         fuel: None,
         date: date_text(5.0),
+        page: None,
         info: "Ross 154 Dist. 0.00 light years\rType M red star: Outdoor ice and water world. Tourism and fishing.".into(),
     });
     let state = Flight {
@@ -81,6 +82,7 @@ fn the_map_console_page_states() {
         sector: map.sector_text(),
         fuel: None,
         date: date_text(5.0),
+        page: None,
         info: map.describe(&viewer, None).unwrap_or_default(),
     };
     let state = Flight {
@@ -183,6 +185,7 @@ fn the_map_key_script_selects_reimages_and_jumps() {
         sector: map.sector_text(),
         fuel: map.fuel_text(nav.destination_report().as_ref()),
         date: nav.date_text(),
+        page: None,
         info: map.describe(&viewer, Some(&details)).unwrap_or_default(),
     });
     let state = Flight {
@@ -283,6 +286,7 @@ fn the_map_destination_and_jump_frames() {
         sector: map.sector_text(),
         fuel: fuel.clone(),
         date: nav.date_text(),
+        page: None,
         info: map.describe(&viewer, Some(&details)).unwrap_or_default(),
     });
     // The scene is deterministic: the same map state renders the same shapes.
@@ -306,6 +310,7 @@ fn the_map_destination_and_jump_frames() {
         sector: arrival_map.sector_text(),
         fuel: None,
         date: nav.date_text(),
+        page: None,
         info: arrival_map
             .describe(&viewer, Some(&details))
             .unwrap_or_default(),

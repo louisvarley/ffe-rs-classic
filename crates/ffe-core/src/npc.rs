@@ -778,6 +778,17 @@ pub const STATION_ACCEL: f64 = 2.0e4;
 pub const MM_PER_VELOCITY_UNIT: f64 = TICS_PER_SECOND / 512.0;
 /// The original's tics per second at 1x (`DATA_009155` is 994 per 20 ms).
 pub const TICS_PER_SECOND: f64 = TICS_PER_FRAME as f64 * 50.0;
+/// The original's AI step, once per game second: the whole-day tick F152 drives
+/// event 6 with (`0xc22e` tics, see `docs/notes/npc.md`). The executed original's
+/// pirate leader (state 4) re-aims at frames 532, 579, 627, 675, ... of a 1,043-tic
+/// frame run, 47.67 frames apart, and the port's `guide` reproduces the words it
+/// writes there (`tests/npc_pirate_replay.rs`).
+pub const THINK_TICS: u32 = 0xc22e;
+
+fn think_due() -> u32 {
+    THINK_TICS
+}
+
 /// The base turn rate in radians per second. F585 limits the per-frame turn and
 /// halves that limit for models 0x35 and above and quarters it from 0x3b; the
 /// base is the port's, calibrated so a Cobra can track a crossing Eagle.
@@ -1138,6 +1149,25 @@ pub struct NpcShip {
     pub missile_rng: crate::RandomState,
     /// Seconds of event-6 time not yet rolled for a launch/ECM attempt.
     pub control_clock: f64,
+    /// Game tics since this ship last re-aimed. The original recomputes an NPC's
+    /// guidance (F596's thrust words, speed caps and turn rates) only on its AI
+    /// step, once per game second ([`THINK_TICS`]); F727's physics applies the
+    /// stored words every frame in between. Starts due, so a new ship aims at once.
+    #[serde(default = "think_due")]
+    pub think_tics: u32,
+    /// F239's police ship in state 0x22 (F748): it waits in the starport until the
+    /// record's door has opened, then attacks (state 1).
+    #[serde(default)]
+    pub scrambled: bool,
+    /// Tics since the scrambled ship's last AI step. F748 only looks at the door on the ship's
+    /// own step (once per [`THINK_TICS`] from its creation), so the executed original attacks
+    /// at the first step after the door opens: 143 frames after the launch on a 126-frame door.
+    #[serde(default)]
+    pub scramble_tics: u32,
+    /// Set when `scrambled` ended: the police turned hostile this tick.
+    /// Taken by [`Self::take_turned`].
+    #[serde(default)]
+    pub turned: bool,
     /// The missile this ship is evading (`+0xfe` while state 0x0c), from F941.
     pub missile_target: Option<u32>,
     /// F757's F935 burst has already been tried this evasion.
@@ -1207,7 +1237,8 @@ pub struct NpcShip {
 }
 
 impl NpcShip {
-    fn new(
+    /// A ship of `spec` at `position`, orbiting `anchor` (the traffic spawn's constructor).
+    pub fn new(
         spec: &Spec,
         role: Role,
         position: [i64; 3],
@@ -1268,6 +1299,10 @@ impl NpcShip {
             pylons,
             missile_rng: crate::RandomState::new(seed, seed.rotate_left(13) ^ 0x4567_89ab),
             control_clock: 0.0,
+            think_tics: THINK_TICS,
+            scrambled: false,
+            scramble_tics: 0,
+            turned: false,
             missile_target: None,
             ecm_attempted: false,
             launch: None,
@@ -1537,6 +1572,24 @@ impl NpcShip {
         true
     }
 
+    /// The wanted bit went clear (F783, or F238 running out of police): the executed original
+    /// puts every police ship that was attacking into state 8, which flies it home, in the
+    /// frame it clears. A police ship still waiting in the starport (state 0x22) stays.
+    pub fn stand_down(&mut self) {
+        if self.alive() && self.role == Role::Police && self.hostile {
+            self.hostile = false;
+            self.responding = false;
+            self.in_combat = false;
+            self.state = State::Transit;
+            self.station = None;
+        }
+    }
+
+    /// Whether a scrambled police ship turned hostile since the last call (F748).
+    pub fn take_turned(&mut self) -> bool {
+        std::mem::take(&mut self.turned)
+    }
+
     /// F750's battle alert since the last call: this ship entered combat
     /// with the player.
     pub fn take_alert(&mut self) -> bool {
@@ -1747,7 +1800,28 @@ impl NpcShip {
                 .pad
                 .or(self.pad)
                 .unwrap_or_else(|| station.bay_point());
-            if station.door_open {
+            if self.scrambled {
+                self.scramble_tics = self
+                    .scramble_tics
+                    .saturating_add((dt * TICS_PER_SECOND).round().max(0.0) as u32);
+            }
+            let step = self.scrambled && self.scramble_tics >= THINK_TICS;
+            if step {
+                self.scramble_tics %= THINK_TICS;
+            }
+            if station.door_open && self.scrambled && !step {
+                // F748 only looks at the door on the ship's own step.
+            } else if station.door_open && self.scrambled {
+                // F748: the record's mode is 0xfe or 0, the door is open: state 1.
+                self.scrambled = false;
+                self.turned = true;
+                self.hostile = true;
+                self.responding = true;
+                self.state = State::Attack;
+                self.position = station.launch_point();
+                self.station = None;
+                self.dock_wait = 0.0;
+            } else if station.door_open {
                 let seat = station
                     .pad
                     .or(self.pad)
@@ -1758,7 +1832,7 @@ impl NpcShip {
                 });
                 self.begin_departure(seat);
                 self.dock_wait = DEPART_SECONDS;
-            } else if self.dock_wait >= DOCK_WAIT_SECONDS {
+            } else if !self.scrambled && self.dock_wait >= DOCK_WAIT_SECONDS {
                 // The door never opened: free the bay and pick a new station.
                 requests.push(DockRequest::Release {
                     ship: self.id,
@@ -2022,10 +2096,18 @@ impl NpcShip {
             .velocity
             .map(|v| (v / MM_PER_VELOCITY_UNIT).round() as i32);
         motion.orientation = [right, self.up, self.forward].map(|row| row.map(q31));
-        let guidance = crate::autopilot::guide(motion, self.position, target, [0; 3], limits, 0);
-        motion.thrust = guidance.thrust;
-        motion.cap = guidance.cap;
-        motion.autopilot = guidance.turns;
+        // F727 applies the stored thrust, caps and turn rates every frame; F750's
+        // F596 refreshes them only on the AI step.
+        self.think_tics = self.think_tics.saturating_add(tics);
+        if self.think_tics >= THINK_TICS {
+            self.think_tics %= THINK_TICS;
+            // F750 passes F596's modifier 1 (the autopilot's own call passes 0).
+            let guidance =
+                crate::autopilot::guide(motion, self.position, target, [0; 3], limits, 1);
+            motion.thrust = guidance.thrust;
+            motion.cap = guidance.cap;
+            motion.autopilot = guidance.turns;
+        }
         motion.accelerate(tics);
         let mut scanner = crate::physics::Scanner::default();
         motion.orient(tics as i32, true, tics as i32, &mut scanner);
@@ -2274,7 +2356,12 @@ pub struct OffenceReport {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Legal {
     pub wanted: bool,
+    /// `DATA_008647 != 0`: the police chase is running or dying away.
     pub alert: bool,
+    /// `DATA_008647` itself: 0, [`crate::police::CHASE`] (1) or [`crate::police::ENDING`]
+    /// (`0xff`). F238 starts it, F240 ends it and F783/F233 clear it.
+    #[serde(default)]
+    pub chase: i8,
     pub illegal_fire: bool,
     pub offences: u32,
     pub fines: [u32; 6],
@@ -2370,7 +2457,14 @@ impl Legal {
         let was_set = self.wanted || self.alert;
         self.wanted = false;
         self.alert = false;
+        self.chase = 0;
         was_set
+    }
+
+    /// Set `DATA_008647`, keeping the `alert` mirror of it.
+    pub fn set_chase(&mut self, chase: i8) {
+        self.chase = chase;
+        self.alert = chase != 0;
     }
 
     /// The fine ledger for a jurisdiction, as F655's `owes` argument. `None`
@@ -2626,6 +2720,10 @@ pub fn restore(records: &[Persisted], player: [i64; 3], first_id: u32) -> Vec<Np
                 (first_id + index as u32).rotate_left(13) ^ 0x2468_ace0,
             ),
             control_clock: 0.0,
+            think_tics: THINK_TICS,
+            scrambled: false,
+            scramble_tics: 0,
+            turned: false,
             missile_target: None,
             ecm_attempted: false,
             launch: None,
@@ -3176,9 +3274,10 @@ pub fn spawn(
         counts.bay_ships = 0;
         counts.aux_traders = 0;
     }
-    // F688 has no police draw, and the executed original's default start holds
-    // no police ship (type 0xe) at all: the new game's pass spawns none.
-    counts.police = if system.new_game {
+    // F688 has no police draw, and nothing in the original spawns a police ship (type 0xe)
+    // outside F238's response, so no entry brings a patrol. Only the port's scripted capture
+    // keeps the patrol its frames were built with.
+    counts.police = if system.new_game || !options.guarantee {
         0
     } else {
         counts.police.min(1)
@@ -3918,6 +4017,106 @@ mod tests {
         assert!(matches!(ship.state, State::Attack | State::Pass));
     }
 
+    /// F750 re-aims once per game second (0xc22e tics); F727 applies the stored
+    /// thrust words every frame in between. The executed original's pirate leader
+    /// changes its words at frames 532, 579, 627, ... of a 1,043-tic frame run.
+    #[test]
+    fn guidance_is_refreshed_once_per_game_second_not_every_frame() {
+        let player = [0, 0, 0];
+        let mut ship = aimed_ship(Role::Pirate, [0, 0, 20_000_000], player);
+        ship.limits = Some(crate::thrust::Limits {
+            axes: [[3270, -3270], [3270, -3270], [8720, -3270]],
+        });
+        let mut changes = Vec::new();
+        let mut previous = ship.motion.thrust;
+        let frames = 400u32;
+        for frame in 0..frames {
+            // 994 tics a 20 ms frame: 400 frames are 397,600 tics, 8 thinks.
+            ship.tick(0.02, 994, player, None);
+            if ship.motion.thrust != previous {
+                changes.push(frame);
+                previous = ship.motion.thrust;
+            }
+        }
+        assert!(!changes.is_empty(), "the ship never aimed");
+        // The first frame thinks at once; later thinks are 0xc22e tics (49.1 frames
+        // at 994 tics) apart, so at most 9 changes in 400 frames, never per frame.
+        assert!(changes.len() <= 9, "guidance changed on {changes:?}");
+        for pair in changes.windows(2) {
+            assert!(pair[1] - pair[0] >= 40, "two thinks {pair:?} frames apart");
+        }
+    }
+
+    /// F783 clears the wanted bit and the executed original sends every attacking police
+    /// ship to state 8 in the same frame; a ship still waiting in the starport stays.
+    /// F748 looks at the door only on the ship's own step (once per game second from its
+    /// creation): the executed original's orbital-station police (`--flight idle` from
+    /// `--start-key=0x04`, FFE_POLICE_TRACE) leave state 0x22 143 frames (three steps) after they
+    /// are made, with the door opening on frame 126, 17 frames earlier.
+    #[test]
+    fn a_waiting_police_ship_attacks_on_its_first_step_after_the_door_opens() {
+        let player = [0, 0, 0];
+        let mut ship = aimed_ship(Role::Police, [0, 0, 2_000_000], player);
+        ship.state = State::Launch;
+        ship.scrambled = true;
+        ship.scramble_tics = 0;
+        let mut station = Station {
+            index: 0,
+            position: [0, 0, 2_000_000],
+            axis: [0.0, 0.0, 1.0],
+            front: 1.0e6,
+            radius: 1.0e6,
+            pad: None,
+            bay: Some(0),
+            cleared: false,
+            closing: false,
+            door_open: false,
+        };
+        let mut turned_at = None;
+        for frame in 1..=300u32 {
+            station.door_open = frame >= 126;
+            let mut requests = Vec::new();
+            ship.tick_with_station(
+                1043.0 / TICS_PER_SECOND,
+                1043,
+                player,
+                None,
+                Some(&station),
+                &mut requests,
+            );
+            if ship.take_turned() && turned_at.is_none() {
+                turned_at = Some(frame);
+            }
+        }
+        let frame = turned_at.expect("the police attack once the door is open");
+        assert!((142..=144).contains(&frame), "turned on frame {frame}");
+        assert_eq!(ship.state, State::Attack);
+    }
+
+    #[test]
+    fn the_police_stand_down_when_the_wanted_bit_clears() {
+        let mut attacker = aimed_ship(Role::Police, [0, 0, 2_000_000], [0; 3]);
+        attacker.hostile = true;
+        attacker.responding = true;
+        attacker.state = State::Attack;
+        attacker.stand_down();
+        assert!(!attacker.hostile && !attacker.responding);
+        assert_eq!(attacker.state, State::Transit);
+        let mut waiting = aimed_ship(Role::Police, [0, 0, 2_000_000], [0; 3]);
+        waiting.state = State::Launch;
+        waiting.scrambled = true;
+        waiting.stand_down();
+        assert_eq!(waiting.state, State::Launch);
+        assert!(waiting.scrambled);
+        // A pirate is not the police's to recall.
+        let mut pirate = aimed_ship(Role::Pirate, [0, 0, 2_000_000], [0; 3]);
+        pirate.hostile = true;
+        pirate.state = State::Attack;
+        pirate.stand_down();
+        assert!(pirate.hostile);
+        assert_eq!(pirate.state, State::Attack);
+    }
+
     #[test]
     fn a_transit_ship_reaches_its_anchor_and_holds() {
         let anchor = [2.0e6 as i64, 0, 0];
@@ -3981,8 +4180,8 @@ mod tests {
     }
 
     /// The executed original's default start (`--npc-trace 260 0x39`) holds no
-    /// police ship (type 0xe) and F688 has no police draw, so the new game's
-    /// pass spawns none; a later entry keeps the port's patrol.
+    /// police ship (type 0xe) and F688 has no police draw, so no entry spawns
+    /// one; only the scripted capture (`guarantee`) keeps the port's patrol.
     #[test]
     fn the_new_game_pass_spawns_no_police() {
         let anchors = [anchor(4), anchor(7)];
@@ -4001,7 +4200,7 @@ mod tests {
             )
         };
         assert!(run(true).iter().all(|ship| ship.role != Role::Police));
-        assert!(run(false).iter().any(|ship| ship.role == Role::Police));
+        assert!(run(false).iter().all(|ship| ship.role != Role::Police));
     }
 
     /// F688's rolls stand: the old per-kind caps (two traders, three bay

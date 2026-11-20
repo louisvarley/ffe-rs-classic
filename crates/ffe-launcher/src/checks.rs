@@ -40,12 +40,44 @@ impl Line {
     }
 }
 
+/// Which kind of release the files are, for the launcher's icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    CdRom,
+    Floppy,
+    Shareware,
+}
+
+/// The recognised release: its kind and a line naming it and its version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    pub kind: Kind,
+    pub text: String,
+}
+
+/// The release a recognised executable belongs to (`None` for a profile this
+/// launcher does not describe).
+pub fn release_of(profile: &ffe_tools::SourceProfile) -> Option<Release> {
+    let (kind, text) = match profile.id {
+        "ffe-cd-1.01-en" => (Kind::CdRom, "CD-ROM release 1.01 (English, 13/04/95)"),
+        "ffe-floppy-1.02-en" => (Kind::Floppy, "Floppy release 1.02 (English, 21/04/95)"),
+        "ffe-shareware-1.06-en" => (Kind::Shareware, "Shareware 1.06 (Elite Club, 2001)"),
+        _ => return None,
+    };
+    Some(Release {
+        kind,
+        text: text.to_owned(),
+    })
+}
+
 /// A finished check: the headline and the details.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub level: Level,
     pub summary: String,
     pub lines: Vec<Line>,
+    /// The release found, when the executable was recognised.
+    pub release: Option<Release>,
 }
 
 impl Report {
@@ -66,6 +98,7 @@ impl Report {
             level,
             summary: summary.to_owned(),
             lines,
+            release: None,
         }
     }
 }
@@ -80,6 +113,7 @@ pub fn verify_game(folder: &Path) -> Report {
                 level: Level::Bad,
                 summary: "Game files not found".to_owned(),
                 lines: vec![Line::bad(error)],
+                release: None,
             }
         }
     };
@@ -89,12 +123,6 @@ pub fn verify_game(folder: &Path) -> Report {
         .is_some_and(|p| p.id == "ffe-shareware-1.06-en");
     if shareware {
         lines.push(Line::warning("Shareware identified; experimental launch is enabled. Its embedded data layout is not supported by the game importer yet; startup errors appear in the game log."));
-    }
-    if inspection.optional_media.avi_files > 0 {
-        lines.push(Line::good(format!(
-            "CD videos present: {} AVI files (presence checked)",
-            inspection.optional_media.avi_files
-        )));
     }
     match inspection.source_profile {
         Some(profile) => lines.push(Line::good(format!(
@@ -128,7 +156,9 @@ pub fn verify_game(folder: &Path) -> Report {
             ffe_tools::Severity::Warning => Line::warning(text),
         });
     }
-    if inspection.inspection_passed && !lines.iter().any(|l| l.level == Level::Bad) {
+    let release = inspection.source_profile.as_ref().and_then(release_of);
+    let mut report = if inspection.inspection_passed && !lines.iter().any(|l| l.level == Level::Bad)
+    {
         Report::from_lines(
             if shareware {
                 "Shareware identified (experimental launch)"
@@ -144,5 +174,59 @@ pub fn verify_game(folder: &Path) -> Report {
         report.level = Level::Bad;
         report.summary = "Game files have problems".to_owned();
         report
+    };
+    report.release = release;
+    report
+}
+
+/// Verify the selected game and create its packed music only on a missing-file
+/// first run. Existing bundles are left untouched for the game to reuse.
+pub fn verify_game_and_prepare_music(folder: &Path, music_bin: &Path) -> Report {
+    let mut report = verify_game(folder);
+    if report.level == Level::Bad {
+        return report;
+    }
+    let line = if music_bin.exists() {
+        Line::good(format!("Using existing {}", music_bin.display()))
+    } else {
+        let library = ffe_audio::MusicLibrary::from_game_dir(folder);
+        match ffe_audio::RenderedMusic::ensure_music_bin(&library, music_bin) {
+            Ok(true) => Line::good(format!(
+                "Generated {} with all 17 rendered music tracks",
+                music_bin.display()
+            )),
+            Ok(false) => Line::good(format!("Using existing {}", music_bin.display())),
+            Err(error) => Line::warning(format!("Music bundle generation failed: {error}")),
+        }
+    };
+    if line.level == Level::Warning && report.level == Level::Good {
+        report.level = Level::Warning;
+        report.summary = "Game files verified; music needs attention".to_owned();
+    }
+    report.lines.push(line);
+    report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_release_is_named_with_its_kind_and_version() {
+        for (id, kind, text) in [
+            ("ffe-cd-1.01-en", Kind::CdRom, "CD-ROM release 1.01"),
+            ("ffe-floppy-1.02-en", Kind::Floppy, "Floppy release 1.02"),
+            ("ffe-shareware-1.06-en", Kind::Shareware, "Shareware 1.06"),
+        ] {
+            let profile = ffe_tools::SourceProfile { id, release: "x" };
+            let release = release_of(&profile).unwrap();
+            assert_eq!(release.kind, kind);
+            assert!(release.text.starts_with(text), "{}", release.text);
+        }
+        let unknown = ffe_tools::SourceProfile {
+            id: "other",
+            release: "x",
+        };
+        assert_eq!(release_of(&unknown), None);
     }
 }
